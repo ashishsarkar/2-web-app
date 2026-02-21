@@ -1,0 +1,7 @@
+[
+  {"id":"h1","name":"Taj Palace Mumbai","location":"Mumbai","address":"Apollo Bandar, Colaba","price":8500,"rating":4.8,"image":"/hotel1.jpg","amenities":["WiFi","Pool","Spa"]},
+  {"id":"h2","name":"ITC Maurya Delhi","location":"New Delhi","address":"Diplomatic Enclave","price":12000,"rating":4.9,"image":"/hotel2.jpg","amenities":["WiFi","Pool","Gym","Restaurant"]},
+  {"id":"h3","name":"Taj West End Bengaluru","location":"Bengaluru","address":"Race Course Road","price":9500,"rating":4.7,"image":"/hotel3.jpg","amenities":["WiFi","Pool","Spa","Garden"]},
+  {"id":"h4","name":"The Oberoi Chennai","location":"Chennai","address":"Egmore","price":7800,"rating":4.6,"image":"/hotel4.jpg","amenities":["WiFi","Pool","Restaurant"]},
+  {"id":"h5","name":"Park Hyatt Goa","location":"Goa","address":"Cansaulim","price":11000,"rating":4.8,"image":"/hotel5.jpg","amenities":["WiFi","Pool","Beach","Spa"]}
+]

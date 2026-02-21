@@ -1,0 +1,18 @@
+export const ROUTES = {
+  HOME: '/',
+  FLIGHT_SEARCH: '/flights/search',
+  FLIGHT_DETAIL: (id) => `/flights/${id}`,
+  HOTEL_SEARCH: '/hotels/search',
+  HOTEL_DETAIL: (id) => `/hotels/${id}`,
+  CHECKOUT: '/checkout',
+  BOOKING_CONFIRMATION: (id) => `/booking/confirmation/${id}`,
+  MY_BOOKINGS: '/my-bookings',
+  PROFILE: '/profile',
+  LOGIN: '/auth/login',
+  REGISTER: '/auth/register',
+  PARTNER_DEMO: '/partner-demo',
+  HELP_CENTRE: '/help',
+  CONTACT_US: '/contact',
+  PRIVACY_POLICY: '/privacy',
+  TERMS_OF_SERVICE: '/terms',
+};
