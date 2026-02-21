@@ -27,3 +27,7 @@ yarn-error.log*
 /playwright-report/
 /blob-report/
 /playwright/.cache/
+
+#CURSOR.md
+CURSOR.md
+.cursorrules
