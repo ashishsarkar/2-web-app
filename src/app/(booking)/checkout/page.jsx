@@ -4,7 +4,7 @@ import { useState, useEffect } from 'react';
 import { useRouter } from 'next/navigation';
 import { useForm } from 'react-hook-form';
 import { zodResolver } from '@hookform/resolvers/zod';
-import axios from 'axios';
+import { apiClient } from '@/lib/api/axios';
 import { useCheckoutStore } from '@/lib/store/checkoutStore';
 import { useCurrencyStore } from '@/lib/store/currencyStore';
 import { createBooking } from '@/lib/api/booking';
@@ -28,7 +28,7 @@ export default function CheckoutPage() {
   const [useWallet, setUseWallet] = useState(false);
 
   useEffect(() => {
-    axios.get('/api/wallet').then((r) => setWalletBalance(r.data.balance || 0)).catch(() => {});
+    apiClient.get('/api/wallet').then((r) => setWalletBalance(r.data.balance || 0)).catch(() => {});
   }, []);
 
   const {
@@ -70,7 +70,7 @@ export default function CheckoutPage() {
     setPromoError('');
     if (!promoCode.trim()) return;
     try {
-      const { data } = await axios.post('/api/promo/validate', { code: promoCode.trim(), amount: basePrice });
+      const { data } = await apiClient.post('/api/promo/validate', { code: promoCode.trim(), amount: basePrice });
       setPromoApplied(data);
     } catch {
       setPromoError('Invalid promo code');
@@ -81,7 +81,7 @@ export default function CheckoutPage() {
   const onSubmit = async (data) => {
     try {
       if (walletDeduction > 0) {
-        await axios.post('/api/wallet', { action: 'use', amount: walletDeduction });
+        await apiClient.post('/api/wallet', { action: 'use', amount: walletDeduction });
       }
       const payload = {
         type: booking.type,
@@ -96,9 +96,6 @@ export default function CheckoutPage() {
         ...data,
       };
       const res = await createBooking(payload);
-      try {
-        localStorage.setItem(`booking_${res.id}`, JSON.stringify({ ...payload, id: res.id, status: 'confirmed', createdAt: res.createdAt || new Date().toISOString() }));
-      } catch {}
       clearCheckout();
       router.push(ROUTES.BOOKING_CONFIRMATION(res.id));
     } catch {

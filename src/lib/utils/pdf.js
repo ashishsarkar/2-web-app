@@ -76,9 +76,8 @@ export async function generateInvoicePDF({ id, status, item, total, format, pass
     doc.setFont(undefined, 'normal');
     doc.setFontSize(8);
     doc.setTextColor(75, 85, 99);
-    doc.text('Janardhan Towers, 4th Floor, 133/2 Residency Road', margin, y + 16);
-    doc.text('Bengaluru, Karnataka — 560025', margin, y + 21);
-    doc.text('support@bookflights.in  |  +91 80 4567 8900', margin, y + 26);
+    doc.text('Bengaluru, Karnataka — 560025', margin, y + 16);
+    doc.text('support@bookflights.in', margin, y + 21);
 
     // Right: invoice meta
     const metaX = pageW - margin - 72;

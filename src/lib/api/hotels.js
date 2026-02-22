@@ -1,7 +1,6 @@
-import axios from 'axios';
+import { apiClient } from './axios';
 
-const baseURL = typeof window !== 'undefined' ? '' : process.env.NEXT_PUBLIC_API_BASE_URL || '';
-const client = axios.create({ baseURL });
+const client = apiClient;
 
 export async function searchHotels(params) {
   const { data } = await client.get('/api/hotels/search', { params });

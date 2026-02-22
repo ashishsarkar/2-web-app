@@ -38,25 +38,8 @@ export default function BookingConfirmationPage() {
 
   useEffect(() => {
     getBookingById(id)
-      .then((data) => {
-        const hasData = data?.flight || data?.hotel || data?.item;
-        if (!hasData) {
-          try {
-            const cached = localStorage.getItem(`booking_${id}`);
-            if (cached) {
-              setBooking({ ...JSON.parse(cached), ...data });
-              return;
-            }
-          } catch {}
-        }
-        setBooking(data);
-      })
-      .catch(() => {
-        try {
-          const cached = localStorage.getItem(`booking_${id}`);
-          if (cached) setBooking(JSON.parse(cached));
-        } catch {}
-      });
+      .then((data) => setBooking(data))
+      .catch(() => setBooking(null));
   }, [id]);
 
   const downloadItinerary = async () => {

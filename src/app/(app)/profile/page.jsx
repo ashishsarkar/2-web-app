@@ -1,7 +1,7 @@
 'use client';
 
 import { useEffect, useState } from 'react';
-import axios from 'axios';
+import { apiClient } from '@/lib/api/axios';
 import { useAuthStore } from '@/lib/store/authStore';
 import { getProfile } from '@/lib/api/user';
 
@@ -23,14 +23,14 @@ export default function ProfilePage() {
   }, []);
 
   useEffect(() => {
-    axios.get('/api/wallet').then((r) => setWalletBalance(r.data.balance || 0)).catch(() => {});
+    apiClient.get('/api/wallet').then((r) => setWalletBalance(r.data.balance || 0)).catch(() => {});
   }, []);
 
   const handleTopUp = async () => {
     const amount = Number(topUpAmount) || 0;
     if (amount <= 0) return;
     try {
-      const { data } = await axios.post('/api/wallet', { action: 'topup', amount });
+      const { data } = await apiClient.post('/api/wallet', { action: 'topup', amount });
       setWalletBalance(data.balance);
       setTopUpAmount('');
     } catch {

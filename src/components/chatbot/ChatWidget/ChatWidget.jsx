@@ -1,21 +1,56 @@
 'use client';
 
-import { useState, useRef, useEffect } from 'react';
+import { useState, useRef, useEffect, useCallback } from 'react';
+
+const SESSION_KEY = 'chat_session_id';
+
+function getOrCreateSessionId() {
+  if (typeof window === 'undefined') return 'default';
+  let id = sessionStorage.getItem(SESSION_KEY);
+  if (!id) {
+    id = `sess_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+    sessionStorage.setItem(SESSION_KEY, id);
+  }
+  return id;
+}
 
 export default function ChatWidget() {
   const [open, setOpen] = useState(false);
-  const [messages, setMessages] = useState([
-    { role: 'assistant', text: "Hi! I'm your booking assistant. How can I help you today?", time: new Date().toISOString() },
-  ]);
+  const [messages, setMessages] = useState([]);
   const [input, setInput] = useState('');
   const [typing, setTyping] = useState(false);
+  const [historyLoaded, setHistoryLoaded] = useState(false);
+  const sessionId = useRef(getOrCreateSessionId());
   const bottomRef = useRef(null);
+  const base = process.env.NEXT_PUBLIC_API_BASE_URL || '';
+
+  // Load chat history from MongoDB on first open
+  useEffect(() => {
+    if (!open || historyLoaded) return;
+    const fetchHistory = async () => {
+      try {
+        const res = await fetch(`${base}/api/chat/history/${sessionId.current}`);
+        if (res.ok) {
+          const data = await res.json();
+          if (data.messages && data.messages.length > 0) {
+            setMessages(data.messages.map((m) => ({ role: m.role, text: m.text, time: m.timestamp })));
+          } else {
+            setMessages([{ role: 'assistant', text: "Hi! I'm your booking assistant. How can I help you today?", time: new Date().toISOString() }]);
+          }
+        }
+      } catch {
+        setMessages([{ role: 'assistant', text: "Hi! I'm your booking assistant. How can I help you today?", time: new Date().toISOString() }]);
+      }
+      setHistoryLoaded(true);
+    };
+    fetchHistory();
+  }, [open, historyLoaded, base]);
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages]);
 
-  const sendMessage = async () => {
+  const sendMessage = useCallback(async () => {
     const text = input.trim();
     if (!text) return;
 
@@ -24,10 +59,10 @@ export default function ChatWidget() {
     setTyping(true);
 
     try {
-      const res = await fetch('/api/chat', {
+      const res = await fetch(`${base}/api/chat`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ message: text }),
+        body: JSON.stringify({ message: text, session_id: sessionId.current }),
       });
       const data = await res.json();
       setMessages((m) => [...m, { role: 'assistant', text: data.message || 'Sorry, I could not understand.', time: new Date().toISOString() }]);
@@ -35,6 +70,15 @@ export default function ChatWidget() {
       setMessages((m) => [...m, { role: 'assistant', text: 'Something went wrong. Please try again.', time: new Date().toISOString() }]);
     } finally {
       setTyping(false);
+    }
+  }, [input, base]);
+
+  const clearHistory = async () => {
+    try {
+      await fetch(`${base}/api/chat/history/${sessionId.current}`, { method: 'DELETE' });
+      setMessages([{ role: 'assistant', text: "Chat cleared! How can I help you?", time: new Date().toISOString() }]);
+    } catch {
+      // ignore
     }
   };
 
@@ -48,13 +92,22 @@ export default function ChatWidget() {
         >
           <div className="flex items-center justify-between p-4 bg-indigo-600 text-white">
             <h3 className="font-semibold">Booking Assistant</h3>
-            <button
-              onClick={() => setOpen(false)}
-              className="p-1 hover:bg-indigo-500 rounded"
-              aria-label="Close chat"
-            >
-              ✕
-            </button>
+            <div className="flex gap-2">
+              <button
+                onClick={clearHistory}
+                className="px-2 py-1 text-xs bg-indigo-500 hover:bg-indigo-400 rounded"
+                title="Clear chat history"
+              >
+                Clear
+              </button>
+              <button
+                onClick={() => setOpen(false)}
+                className="p-1 hover:bg-indigo-500 rounded"
+                aria-label="Close chat"
+              >
+                ✕
+              </button>
+            </div>
           </div>
           <div className="flex-1 overflow-y-auto p-4 space-y-4">
             {messages.map((msg, i) => (
