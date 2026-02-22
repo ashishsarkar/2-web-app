@@ -5,11 +5,13 @@ import { useSearchParams } from 'next/navigation';
 import Link from 'next/link';
 import { searchHotels } from '@/lib/api/hotels';
 import { useWishlistStore } from '@/lib/store/wishlistStore';
+import { useSavedSearchesStore } from '@/lib/store/savedSearchesStore';
 import { useCurrencyStore } from '@/lib/store/currencyStore';
 import { ROUTES } from '@/lib/constants/routes';
 
 function HotelSearchContent() {
   const { addHotel, removeHotel, hotels: savedHotels } = useWishlistStore();
+  const addSearch = useSavedSearchesStore((s) => s.addSearch);
   const format = useCurrencyStore((s) => s.format);
   const searchParams = useSearchParams();
   const [hotels, setHotels] = useState([]);
@@ -37,7 +39,23 @@ function HotelSearchContent() {
 
   return (
     <div className="max-w-4xl mx-auto px-4 py-12">
-      <h1 className="text-2xl font-bold text-gray-900 mb-6">Hotel Search Results</h1>
+      <div className="flex justify-between items-center mb-6">
+        <h1 className="text-2xl font-bold text-gray-900">Hotel Search Results</h1>
+        {searchParams.get('location') && (
+          <button
+            type="button"
+            onClick={() => addSearch({
+              type: 'hotel',
+              location: searchParams.get('location'),
+              checkIn: searchParams.get('checkIn') || '',
+              checkOut: searchParams.get('checkOut') || '',
+            })}
+            className="text-sm text-indigo-600 hover:underline"
+          >
+            Save this search
+          </button>
+        )}
+      </div>
       {hotels.length === 0 ? (
         <div className="bg-white rounded-xl p-12 text-center">
           <p className="text-gray-600">No hotels found. Try a different location.</p>

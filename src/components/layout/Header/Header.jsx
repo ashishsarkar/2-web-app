@@ -24,6 +24,12 @@ export default function Header() {
             <Link href={ROUTES.HOTEL_SEARCH} className="text-gray-600 hover:text-indigo-600 font-medium">
               Hotels
             </Link>
+            <Link href={ROUTES.DESTINATIONS} className="text-gray-600 hover:text-indigo-600 font-medium">
+              Destinations
+            </Link>
+            <Link href={ROUTES.DEALS} className="text-gray-600 hover:text-indigo-600 font-medium">
+              Deals
+            </Link>
             <Link href={ROUTES.MY_BOOKINGS} className="text-gray-600 hover:text-indigo-600 font-medium">
               My Bookings
             </Link>
@@ -32,6 +38,9 @@ export default function Header() {
             </Link>
             <Link href={ROUTES.PRICE_ALERTS} className="text-gray-600 hover:text-indigo-600 font-medium">
               Price Alerts
+            </Link>
+            <Link href={ROUTES.SAVED_SEARCHES} className="text-gray-600 hover:text-indigo-600 font-medium">
+              Saved Searches
             </Link>
           </nav>
 

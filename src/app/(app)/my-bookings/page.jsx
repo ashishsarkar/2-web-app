@@ -6,6 +6,8 @@ import { getMyBookings } from '@/lib/api/user';
 import { cancelBooking } from '@/lib/api/booking';
 import { ROUTES } from '@/lib/constants/routes';
 import { useCurrencyStore } from '@/lib/store/currencyStore';
+import { useAuthStore } from '@/lib/store/authStore';
+import { generateInvoicePDF, generateItineraryPDF } from '@/lib/utils/pdf';
 
 const CHECKIN_BASE = 'https://checkin.example.com';
 
@@ -14,6 +16,7 @@ export default function MyBookingsPage() {
   const [loading, setLoading] = useState(true);
   const [cancelling, setCancelling] = useState(null);
   const format = useCurrencyStore((s) => s.format);
+  const user = useAuthStore((s) => s.user);
 
   const loadBookings = () => {
     getMyBookings()
@@ -28,8 +31,8 @@ export default function MyBookingsPage() {
     if (!confirm('Cancel this booking?')) return;
     setCancelling(id);
     try {
-      await cancelBooking(id);
-      setBookings((prev) => prev.map((b) => (b.id === id ? { ...b, status: 'cancelled' } : b)));
+      const res = await cancelBooking(id);
+      setBookings((prev) => prev.map((b) => (b.id === id ? { ...b, status: 'cancelled', refundStatus: res.refundStatus } : b)));
     } catch {
       alert('Could not cancel.');
     } finally {
@@ -37,14 +40,32 @@ export default function MyBookingsPage() {
     }
   };
 
-  const downloadInvoice = (b) => {
-    const item = b.item || b.flight || b.hotel;
+  const getItem = (b) => b.item || (b.type === 'bundle' && (b.flight || b.hotel) ? { flight: b.flight, hotel: b.hotel } : null) || (b.flight ? { flight: b.flight } : null) || (b.hotel ? { hotel: b.hotel } : null);
+  const getTotal = (b) => {
+    if (b.total != null) return b.total;
+    const item = getItem(b);
+    if (!item) return 0;
+    if (item.flight && item.hotel) return (item.flight.price ?? 0) + (item.hotel.price ?? item.hotel.rooms?.[0]?.price ?? 0);
+    return item.price ?? item.flight?.price ?? item.hotel?.price ?? item.hotel?.rooms?.[0]?.price ?? 0;
+  };
+
+  const downloadInvoice = async (b) => {
+    const item = getItem(b);
+    const ok = await generateInvoicePDF({
+      id: b.id,
+      status: b.status,
+      item,
+      total: getTotal(b),
+      format,
+      passengerName: user?.name || 'Guest',
+    });
+    if (ok !== false) return;
     const lines = [
       `Booking: ${b.id}`,
       `Status: ${b.status}`,
       item?.airline ? `Flight: ${item.airline} ${item.origin} → ${item.destination}` : '',
       item?.name ? `Hotel: ${item.name} - ${item.location}` : '',
-      `Amount: ${format(b.total || item?.price || 0)}`,
+      `Amount: ${format(getTotal(b))}`,
     ].filter(Boolean);
     const blob = new Blob([lines.join('\n')], { type: 'text/plain' });
     const a = document.createElement('a');
@@ -92,6 +113,11 @@ export default function MyBookingsPage() {
                     }`}>
                       {b.status}
                     </span>
+                    {b.status === 'cancelled' && b.refundStatus && (
+                      <span className="ml-2 px-2 py-0.5 rounded text-sm bg-amber-100 text-amber-800">
+                        Refund {b.refundStatus}
+                      </span>
+                    )}
                     {item && (
                       <p className="text-gray-600 mt-1">
                         {item.flight && item.hotel
@@ -118,6 +144,26 @@ export default function MyBookingsPage() {
                     )}
                     {b.status !== 'cancelled' && (
                       <>
+                        <button
+                          type="button"
+                          onClick={async () => {
+                            const item = getItem(b);
+                            const ok = await generateItineraryPDF({ id: b.id, status: b.status, item, total: getTotal(b), format });
+                            if (ok !== false) return;
+                            const f = item?.flight || (item?.airline ? item : null);
+                            const h = item?.hotel || (item?.name ? item : null);
+                            const lines = [`Booking: ${b.id}`, `Status: ${b.status}`, f ? `Flight: ${f.airline} ${f.origin} → ${f.destination}` : '', h ? `Hotel: ${h.name} - ${h.location}` : '', `Total: ${format(getTotal(b))}`].filter(Boolean);
+                            const blob = new Blob([lines.join('\n')], { type: 'text/plain' });
+                            const a = document.createElement('a');
+                            a.href = URL.createObjectURL(blob);
+                            a.download = `itinerary-${b.id}.txt`;
+                            a.click();
+                            URL.revokeObjectURL(a.href);
+                          }}
+                          className="px-4 py-2 bg-gray-100 rounded-lg text-sm font-medium hover:bg-gray-200"
+                        >
+                          Download itinerary
+                        </button>
                         <button
                           type="button"
                           onClick={() => downloadInvoice(b)}

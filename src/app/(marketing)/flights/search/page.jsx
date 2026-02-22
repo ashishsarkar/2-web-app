@@ -5,11 +5,13 @@ import { useSearchParams } from 'next/navigation';
 import Link from 'next/link';
 import { searchFlights } from '@/lib/api/flights';
 import { useWishlistStore } from '@/lib/store/wishlistStore';
+import { useSavedSearchesStore } from '@/lib/store/savedSearchesStore';
 import { useCurrencyStore } from '@/lib/store/currencyStore';
 import { ROUTES } from '@/lib/constants/routes';
 
 function FlightSearchContent() {
   const { addFlight, removeFlight, flights: savedFlights } = useWishlistStore();
+  const addSearch = useSavedSearchesStore((s) => s.addSearch);
   const format = useCurrencyStore((s) => s.format);
   const searchParams = useSearchParams();
   const [flights, setFlights] = useState([]);
@@ -38,7 +40,23 @@ function FlightSearchContent() {
 
   return (
     <div className="max-w-4xl mx-auto px-4 py-12">
-      <h1 className="text-2xl font-bold text-gray-900 mb-6">Flight Search Results</h1>
+      <div className="flex justify-between items-center mb-6">
+        <h1 className="text-2xl font-bold text-gray-900">Flight Search Results</h1>
+        {searchParams.get('origin') && searchParams.get('destination') && (
+          <button
+            type="button"
+            onClick={() => addSearch({
+              type: 'flight',
+              origin: searchParams.get('origin'),
+              destination: searchParams.get('destination'),
+              departureDate: searchParams.get('departureDate') || '',
+            })}
+            className="text-sm text-indigo-600 hover:underline"
+          >
+            Save this search
+          </button>
+        )}
+      </div>
       {flights.length === 0 ? (
         <div className="bg-white rounded-xl p-12 text-center">
           <p className="text-gray-600">No flights found. Try different search criteria.</p>

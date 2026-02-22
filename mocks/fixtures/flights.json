@@ -1,7 +1,7 @@
 [
-  {"id":"f1","origin":"DEL","originCity":"New Delhi","destination":"BOM","destinationCity":"Mumbai","departureTime":"2025-03-15T08:00:00Z","arrivalTime":"2025-03-15T10:30:00Z","price":4500,"airline":"IndiGo","duration":"2h 30m"},
+  {"id":"f1","origin":"DEL","originCity":"New Delhi","destination":"BOM","destinationCity":"Mumbai","departureTime":"2025-03-15T08:00:00Z","arrivalTime":"2025-03-15T10:30:00Z","price":4500,"airline":"Booking Life","duration":"2h 30m"},
   {"id":"f2","origin":"BOM","originCity":"Mumbai","destination":"DEL","destinationCity":"New Delhi","departureTime":"2025-03-16T14:00:00Z","arrivalTime":"2025-03-16T16:30:00Z","price":5200,"airline":"Air India","duration":"2h 30m"},
-  {"id":"f3","origin":"BLR","originCity":"Bengaluru","destination":"GOI","destinationCity":"Goa","departureTime":"2025-03-17T09:00:00Z","arrivalTime":"2025-03-17T10:00:00Z","price":3200,"airline":"IndiGo","duration":"1h"},
+  {"id":"f3","origin":"BLR","originCity":"Bengaluru","destination":"GOI","destinationCity":"Goa","departureTime":"2025-03-17T09:00:00Z","arrivalTime":"2025-03-17T10:00:00Z","price":3200,"airline":"Booking Life","duration":"1h"},
   {"id":"f4","origin":"MAA","originCity":"Chennai","destination":"HYD","destinationCity":"Hyderabad","departureTime":"2025-03-18T11:30:00Z","arrivalTime":"2025-03-18T12:45:00Z","price":2800,"airline":"SpiceJet","duration":"1h 15m"},
   {"id":"f5","origin":"DEL","originCity":"New Delhi","destination":"CCU","destinationCity":"Kolkata","departureTime":"2025-03-19T06:00:00Z","arrivalTime":"2025-03-19T08:15:00Z","price":4100,"airline":"Vistara","duration":"2h 15m"}
 ]

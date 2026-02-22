@@ -18,6 +18,10 @@ export async function PATCH(request, { params }) {
     return NextResponse.json({ error: 'Booking not found' }, { status: 404 });
   }
   const updated = { ...booking, ...body };
+  if (body.status === 'cancelled') {
+    updated.refundStatus = 'initiated';
+    updated.refundInitiatedAt = new Date().toISOString();
+  }
   mockBookingsStore.set(id, updated);
   return NextResponse.json(updated);
 }

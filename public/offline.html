@@ -3,10 +3,22 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Offline</title>
+  <title>Offline - Flight & Hotel Booking</title>
+  <style>
+    *{margin:0;padding:0;box-sizing:border-box}
+    body{min-height:100vh;display:flex;flex-direction:column;align-items:center;justify-content:center;font-family:system-ui,sans-serif;background:#f3f4f6;padding:2rem}
+    h1{font-size:1.5rem;color:#111;margin-bottom:0.5rem}
+    p{color:#6b7280;margin-bottom:1rem}
+    button{padding:0.5rem 1rem;background:#4f46e5;color:#fff;border:none;border-radius:0.5rem;cursor:pointer;font-size:1rem}
+    button:hover{background:#4338ca}
+  </style>
 </head>
 <body>
-  <h1>You are offline</h1>
-  <p>Please check your connection and try again.</p>
+  <div style="text-align:center">
+    <span style="font-size:4rem;display:block;margin-bottom:1rem">📵</span>
+    <h1>You are offline</h1>
+    <p>Please check your connection and try again.</p>
+    <button onclick="window.location.reload()">Retry</button>
+  </div>
 </body>
 </html>

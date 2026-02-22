@@ -7,6 +7,7 @@ import { getHotelById, searchHotels } from '@/lib/api/hotels';
 import { useCheckoutStore } from '@/lib/store/checkoutStore';
 import { ROUTES } from '@/lib/constants/routes';
 import HotelCard from '@/components/hotels/HotelCard';
+import HotelMap from '@/components/hotels/HotelMap';
 import { useCurrencyStore } from '@/lib/store/currencyStore';
 
 export default function HotelDetailPage() {
@@ -62,10 +63,8 @@ export default function HotelDetailPage() {
         <h1 className="text-2xl font-bold text-gray-900 mb-6">{hotel.name}</h1>
 
         <div className="mb-6 p-4 bg-gray-50 rounded-xl">
-          <h3 className="font-semibold text-gray-900 mb-2">📍 Map</h3>
-          <div className="h-40 bg-gray-200 rounded-lg flex items-center justify-center text-gray-500 text-sm">
-            Map placeholder — {hotel.address}, {hotel.location}
-          </div>
+          <h3 className="font-semibold text-gray-900 mb-2">📍 Location</h3>
+          <HotelMap lat={hotel.lat} lng={hotel.lng} address={hotel.address} name={hotel.name} />
         </div>
 
         <div className="space-y-4 mb-6">

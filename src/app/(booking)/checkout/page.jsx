@@ -1,6 +1,6 @@
 'use client';
 
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { useRouter } from 'next/navigation';
 import { useForm } from 'react-hook-form';
 import { zodResolver } from '@hookform/resolvers/zod';
@@ -24,6 +24,12 @@ export default function CheckoutPage() {
   const [promoApplied, setPromoApplied] = useState(null);
   const [promoError, setPromoError] = useState('');
   const [insurance, setInsurance] = useState(false);
+  const [walletBalance, setWalletBalance] = useState(0);
+  const [useWallet, setUseWallet] = useState(false);
+
+  useEffect(() => {
+    axios.get('/api/wallet').then((r) => setWalletBalance(r.data.balance || 0)).catch(() => {});
+  }, []);
 
   const {
     register,
@@ -56,7 +62,9 @@ export default function CheckoutPage() {
   }
   const insuranceTotal = insurance ? INSURANCE_PRICE : 0;
   const promoDiscount = promoApplied?.savings ?? 0;
-  const total = Math.max(0, basePrice + insuranceTotal - promoDiscount);
+  const subtotal = Math.max(0, basePrice + insuranceTotal - promoDiscount);
+  const walletDeduction = useWallet ? Math.min(walletBalance, subtotal) : 0;
+  const total = Math.max(0, subtotal - walletDeduction);
 
   const handleApplyPromo = async () => {
     setPromoError('');
@@ -72,14 +80,25 @@ export default function CheckoutPage() {
 
   const onSubmit = async (data) => {
     try {
-      const res = await createBooking({
+      if (walletDeduction > 0) {
+        await axios.post('/api/wallet', { action: 'use', amount: walletDeduction });
+      }
+      const payload = {
         type: booking.type,
         item: booking.type === 'bundle' ? { flight: booking.flight, hotel: booking.hotel } : (booking.flight || booking.hotel),
+        flight: booking.flight || null,
+        hotel: booking.hotel || null,
         promo: promoApplied,
         insurance,
         total,
+        useWallet: walletDeduction > 0,
+        walletDeduction,
         ...data,
-      });
+      };
+      const res = await createBooking(payload);
+      try {
+        localStorage.setItem(`booking_${res.id}`, JSON.stringify({ ...payload, id: res.id, status: 'confirmed', createdAt: res.createdAt || new Date().toISOString() }));
+      } catch {}
       clearCheckout();
       router.push(ROUTES.BOOKING_CONFIRMATION(res.id));
     } catch {
@@ -123,6 +142,12 @@ export default function CheckoutPage() {
               <span>-{format(promoDiscount)}</span>
             </div>
           )}
+          {walletDeduction > 0 && (
+            <div className="flex justify-between text-green-600">
+              <span>Wallet credits</span>
+              <span>-{format(walletDeduction)}</span>
+            </div>
+          )}
           <div className="flex justify-between text-lg font-bold pt-2">
             <span>Total</span>
             <span className="text-indigo-600">{format(total)}</span>
@@ -148,6 +173,12 @@ export default function CheckoutPage() {
           <input type="checkbox" checked={insurance} onChange={(e) => setInsurance(e.target.checked)} className="rounded" />
           <span>Add travel insurance (+{format(INSURANCE_PRICE)})</span>
         </label>
+        {walletBalance > 0 && (
+          <label className="mt-2 flex items-center gap-2 cursor-pointer">
+            <input type="checkbox" checked={useWallet} onChange={(e) => setUseWallet(e.target.checked)} className="rounded" />
+            <span>Use wallet credits (₹{walletBalance.toLocaleString()} available)</span>
+          </label>
+        )}
       </div>
 
       <form onSubmit={handleSubmit(onSubmit)} className="bg-white rounded-xl shadow border border-gray-100 p-6">
