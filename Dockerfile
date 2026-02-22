@@ -12,8 +12,9 @@
 # CMD ["npm", "run", "dev"]
 
 # --- Recommended Dockerfile ---
+# CI flow: deps → validate (lint + build) → test (unit tests) → dev
 
-# Stage 1: Dependencies
+# Stage 1: Dependencies (including devDependencies for lint, build & test)
 FROM node:20-alpine AS deps
 WORKDIR /app
 
@@ -22,17 +23,20 @@ RUN corepack enable && corepack prepare pnpm@latest --activate
 COPY package.json pnpm-lock.yaml* pnpm-workspace.yaml* ./
 COPY packages/ ./packages/
 
+ENV NODE_ENV=development
 RUN pnpm install --frozen-lockfile 2>/dev/null || pnpm install || npm install
 
-# Stage 2: Development (use: docker build --target dev .)
-FROM node:20-alpine AS dev
-WORKDIR /app
-
-RUN corepack enable && corepack prepare pnpm@latest --activate
-
-COPY --from=deps /app/node_modules ./node_modules
+# Stage 2: Validate — lint + build (catches syntax, import, package errors)
+FROM deps AS validate
 COPY . .
+RUN pnpm run lint && pnpm run build
 
+# Stage 3: Test — unit tests (only if validate passed)
+FROM validate AS test
+RUN pnpm test || npm test
+
+# Stage 4: Development (only if all above passed)
+FROM test AS dev
 EXPOSE 3000
 CMD ["pnpm", "run", "dev"]
 
