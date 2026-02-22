@@ -12,3 +12,8 @@ export async function getBookingById(id) {
   const { data } = await client.get(`/api/booking/${id}`);
   return data;
 }
+
+export async function cancelBooking(id) {
+  const { data } = await client.patch(`/api/booking/${id}`, { status: 'cancelled' });
+  return data;
+}

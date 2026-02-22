@@ -4,9 +4,13 @@ import { useEffect, useState, Suspense } from 'react';
 import { useSearchParams } from 'next/navigation';
 import Link from 'next/link';
 import { searchFlights } from '@/lib/api/flights';
+import { useWishlistStore } from '@/lib/store/wishlistStore';
+import { useCurrencyStore } from '@/lib/store/currencyStore';
 import { ROUTES } from '@/lib/constants/routes';
 
 function FlightSearchContent() {
+  const { addFlight, removeFlight, flights: savedFlights } = useWishlistStore();
+  const format = useCurrencyStore((s) => s.format);
   const searchParams = useSearchParams();
   const [flights, setFlights] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -41,35 +45,44 @@ function FlightSearchContent() {
         </div>
       ) : (
         <div className="space-y-4">
-          {flights.map((f) => (
-            <Link
-              key={f.id}
-              href={ROUTES.FLIGHT_DETAIL(f.id)}
-              className="block bg-white rounded-xl p-6 shadow border border-gray-100 hover:shadow-md transition"
-            >
-              <div className="flex justify-between items-center flex-wrap gap-4">
-                <div className="flex items-center gap-4">
-                  <span className="text-2xl">✈</span>
-                  <div>
-                    <p className="font-semibold text-gray-900">{f.airline}</p>
-                    <p className="text-gray-600">{f.origin} → {f.destination} • {f.duration}</p>
-                    <p className="text-sm text-gray-500">
-                      {new Date(f.departureTime).toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit' })}
-                      {' - '}
-                      {new Date(f.arrivalTime).toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit' })}
-                    </p>
+          {flights.map((f) => {
+            const saved = savedFlights?.some((x) => x.id === f.id);
+            return (
+              <div key={f.id} className="bg-white rounded-xl p-6 shadow border border-gray-100 hover:shadow-md transition relative">
+                <button
+                  type="button"
+                  onClick={() => saved ? removeFlight(f.id) : addFlight(f)}
+                  className="absolute top-4 right-4 p-1 rounded hover:bg-gray-100"
+                  title={saved ? 'Remove from wishlist' : 'Save to wishlist'}
+                >
+                  {saved ? '❤️' : '🤍'}
+                </button>
+                <Link href={ROUTES.FLIGHT_DETAIL(f.id)}>
+                  <div className="flex justify-between items-center flex-wrap gap-4">
+                    <div className="flex items-center gap-4">
+                      <span className="text-2xl">✈</span>
+                      <div>
+                        <p className="font-semibold text-gray-900">{f.airline}</p>
+                        <p className="text-gray-600">{f.origin} → {f.destination} • {f.duration}</p>
+                        <p className="text-sm text-gray-500">
+                          {new Date(f.departureTime).toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit' })}
+                          {' - '}
+                          {new Date(f.arrivalTime).toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit' })}
+                        </p>
+                      </div>
+                    </div>
+                    <div className="text-right">
+                      <p className="text-xl font-bold text-indigo-600">{format(f.price)}</p>
+                      <p className="text-sm text-gray-500">per person</p>
+                      <span className="inline-block mt-2 px-4 py-2 bg-indigo-100 text-indigo-700 rounded-lg text-sm font-medium">
+                        Select
+                      </span>
+                    </div>
                   </div>
-                </div>
-                <div className="text-right">
-                  <p className="text-xl font-bold text-indigo-600">₹{f.price?.toLocaleString()}</p>
-                  <p className="text-sm text-gray-500">per person</p>
-                  <span className="inline-block mt-2 px-4 py-2 bg-indigo-100 text-indigo-700 rounded-lg text-sm font-medium">
-                    Select
-                  </span>
-                </div>
+                </Link>
               </div>
-            </Link>
-          ))}
+            );
+          })}
         </div>
       )}
     </div>

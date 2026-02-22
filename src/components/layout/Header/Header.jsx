@@ -3,9 +3,11 @@
 import Link from 'next/link';
 import { ROUTES } from '@/lib/constants/routes';
 import { useAuthStore } from '@/lib/store/authStore';
+import { useCurrencyStore } from '@/lib/store/currencyStore';
 
 export default function Header() {
   const { user, logout } = useAuthStore();
+  const { currency, setCurrency } = useCurrencyStore();
 
   return (
     <header className="bg-white shadow-sm border-b border-gray-200">
@@ -25,9 +27,26 @@ export default function Header() {
             <Link href={ROUTES.MY_BOOKINGS} className="text-gray-600 hover:text-indigo-600 font-medium">
               My Bookings
             </Link>
+            <Link href={ROUTES.WISHLIST} className="text-gray-600 hover:text-indigo-600 font-medium">
+              Wishlist
+            </Link>
+            <Link href={ROUTES.PRICE_ALERTS} className="text-gray-600 hover:text-indigo-600 font-medium">
+              Price Alerts
+            </Link>
           </nav>
 
           <div className="flex items-center gap-4">
+            <select
+              value={currency}
+              onChange={(e) => setCurrency(e.target.value)}
+              className="text-sm border border-gray-300 rounded-lg px-2 py-1 bg-white text-gray-700"
+              aria-label="Currency"
+            >
+              <option value="INR">₹ INR</option>
+              <option value="USD">$ USD</option>
+              <option value="EUR">€ EUR</option>
+              <option value="GBP">£ GBP</option>
+            </select>
             {user ? (
               <>
                 <Link href={ROUTES.PROFILE} className="text-gray-600 hover:text-indigo-600 font-medium">

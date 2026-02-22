@@ -2,6 +2,7 @@ import './globals.css';
 import Header from '@/components/layout/Header/Header';
 import Footer from '@/components/layout/Footer/Footer';
 import ChatWidget from '@/components/chatbot/ChatWidget/ChatWidget';
+import PWAInstallPrompt from '@/components/shared/PWAInstallPrompt';
 
 export const metadata = {
   title: 'Book - Flights & Hotels',
@@ -16,6 +17,7 @@ export default function RootLayout({ children }) {
         <main className="flex-1">{children}</main>
         <Footer />
         <ChatWidget />
+        <PWAInstallPrompt />
       </body>
     </html>
   );
