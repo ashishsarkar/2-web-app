@@ -31,3 +31,4 @@ yarn-error.log*
 #CURSOR.md
 CURSOR.md
 .cursorrules
+.cursorignore
