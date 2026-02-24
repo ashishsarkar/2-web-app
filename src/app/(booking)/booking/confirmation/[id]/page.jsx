@@ -4,6 +4,7 @@ import { useEffect, useState } from 'react';
 import { useParams } from 'next/navigation';
 import Link from 'next/link';
 import { getBookingById } from '@/lib/api/booking';
+import { getConfirmationsLog } from '@/lib/api/confirmations';
 import { ROUTES } from '@/lib/constants/routes';
 import { useCurrencyStore } from '@/lib/store/currencyStore';
 import { useAuthStore } from '@/lib/store/authStore';
@@ -33,6 +34,7 @@ export default function BookingConfirmationPage() {
   const params = useParams();
   const id = params.id;
   const [booking, setBooking] = useState(null);
+  const [confirmationsLog, setConfirmationsLog] = useState([]);
   const format = useCurrencyStore((s) => s.format);
   const user = useAuthStore((s) => s.user);
 
@@ -40,6 +42,12 @@ export default function BookingConfirmationPage() {
     getBookingById(id)
       .then((data) => setBooking(data))
       .catch(() => setBooking(null));
+  }, [id]);
+
+  useEffect(() => {
+    getConfirmationsLog(10)
+      .then((res) => setConfirmationsLog(res?.confirmations || []))
+      .catch(() => setConfirmationsLog([]));
   }, [id]);
 
   const downloadItinerary = async () => {
@@ -162,6 +170,23 @@ export default function BookingConfirmationPage() {
       ) : (
         <div className="bg-white rounded-xl shadow border border-gray-100 p-12 text-center mb-8">
           <p className="text-gray-500">Itinerary details will appear here once your booking is loaded. You can download the itinerary PDF below.</p>
+        </div>
+      )}
+
+      {confirmationsLog.length > 0 && (
+        <div className="mb-6 bg-emerald-50 border border-emerald-200 rounded-xl p-4">
+          <h3 className="font-semibold text-emerald-800 mb-2">Confirmation pipeline</h3>
+          <p className="text-sm text-emerald-700 mb-2">
+            Your booking was published to Kafka and queued for confirmation. Recent confirmations processed:
+          </p>
+          <ul className="text-sm space-y-1 max-h-24 overflow-y-auto">
+            {confirmationsLog.slice(0, 5).map((c, i) => (
+              <li key={i} className={c.booking_id === id ? 'font-medium text-emerald-900' : 'text-emerald-700'}>
+                {c.booking_id} — {c.type} — {c.created_at ? new Date(c.created_at).toLocaleString() : ''}
+                {c.booking_id === id && ' (this booking)'}
+              </li>
+            ))}
+          </ul>
         </div>
       )}
 
