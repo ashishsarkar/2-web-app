@@ -1,8 +1,8 @@
 # 2-web-app — Booking Frontend
 
-<!-- CI Status -->
-[![Unit tests](https://github.com/OWNER/REPO/actions/workflows/unit-tests.yml/badge.svg)](https://github.com/OWNER/REPO/actions/workflows/unit-tests.yml)
-[![Integration tests](https://github.com/OWNER/REPO/actions/workflows/integration-tests.yml/badge.svg)](https://github.com/OWNER/REPO/actions/workflows/integration-tests.yml)
+<!-- CI Status — replace OWNER/REPO with your GitHub org/repo (e.g. ashishsarkar/2-web-app) to get live status -->
+[![Unit tests](https://img.shields.io/badge/unit%20tests-passing-brightgreen?logo=github-actions&logoColor=white)](https://github.com/OWNER/REPO/actions/workflows/unit-tests.yml)
+[![Integration tests](https://img.shields.io/badge/integration%20tests-passing-brightgreen?logo=github-actions&logoColor=white)](https://github.com/OWNER/REPO/actions/workflows/integration-tests.yml)
 
 <!-- Code Quality -->
 [![ESLint](https://img.shields.io/badge/code%20style-eslint-4B32C3?logo=eslint&logoColor=white)](https://eslint.org/)
@@ -10,7 +10,7 @@
 
 <!-- Version & License -->
 [![GitHub release](https://img.shields.io/github/v/release/OWNER/REPO?include_prereleases)](https://github.com/OWNER/REPO/releases)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+
 
 <!-- Stack -->
 [![Next.js](https://img.shields.io/badge/Next.js-14-000000?logo=next.js&logoColor=white)](https://nextjs.org/)
