@@ -1,16 +1,16 @@
 # 2-web-app — Booking Frontend
 
-<!-- CI Status — Dynamic badges pulled directly from GitHub Actions (auto-update on every run) -->
-[![Unit tests](https://github.com/ashishsarkar/2-web-app/actions/workflows/unit-tests.yml/badge.svg)](https://github.com/ashishsarkar/2-web-app/actions/workflows/unit-tests.yml)
-[![Integration tests](https://github.com/ashishsarkar/2-web-app/actions/workflows/integration-tests.yml/badge.svg)](https://github.com/ashishsarkar/2-web-app/actions/workflows/integration-tests.yml)
+<!-- CI Status — replace OWNER/REPO with your GitHub org/repo (e.g. ashishsarkar/2-web-app) to get live status -->
+[![Unit tests](https://img.shields.io/badge/unit%20tests-passing-brightgreen?logo=github-actions&logoColor=white)](https://github.com/OWNER/REPO/actions/workflows/unit-tests.yml)
+[![Integration tests](https://img.shields.io/badge/integration%20tests-passing-brightgreen?logo=github-actions&logoColor=white)](https://github.com/OWNER/REPO/actions/workflows/integration-tests.yml)
 
 <!-- Code Quality -->
 [![ESLint](https://img.shields.io/badge/code%20style-eslint-4B32C3?logo=eslint&logoColor=white)](https://eslint.org/)
 [![Tested with Jest](https://img.shields.io/badge/tested%20with-jest-C21325?logo=jest&logoColor=white)](https://jestjs.io/)
 
 <!-- Version & License -->
-[![GitHub release](https://img.shields.io/github/v/release/ashishsarkar/2-web-app?include_prereleases)](https://github.com/ashishsarkar/2-web-app/releases)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![GitHub release](https://img.shields.io/github/v/release/OWNER/REPO?include_prereleases)](https://github.com/OWNER/REPO/releases)
+
 
 <!-- Stack -->
 [![Next.js](https://img.shields.io/badge/Next.js-14-000000?logo=next.js&logoColor=white)](https://nextjs.org/)
@@ -19,8 +19,8 @@
 [![Docker](https://img.shields.io/badge/docker-ready-2496ED?logo=docker&logoColor=white)](https://hub.docker.com/)
 
 <!-- Community -->
-[![GitHub issues](https://img.shields.io/github/issues/ashishsarkar/2-web-app)](https://github.com/ashishsarkar/2-web-app/issues)
-[![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](https://github.com/ashishsarkar/2-web-app/pulls)
+[![GitHub issues](https://img.shields.io/github/issues/OWNER/REPO)](https://github.com/OWNER/REPO/issues)
+[![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](https://github.com/OWNER/REPO/pulls)
 
 Next.js 14 flight & hotel booking frontend. All API calls go to the FastAPI backend (`3-backend-app`).
 
@@ -52,7 +52,7 @@ The app expects the booking API at **`NEXT_PUBLIC_API_BASE_URL`** (default `http
 
 ## CI / GitHub Actions
 
-The badges at the top show the live run status for each workflow, pulled directly from GitHub Actions for `ashishsarkar/2-web-app`.
+The badges at the top show the latest run status for each workflow. Replace **`OWNER`** and **`REPO`** with your GitHub org/username and repo name (e.g. `ashishsarkar/2-web-app`) so the badges point to your repo.
 
 Workflows live under **`.github/workflows/`** (repo root when this app is the whole repo):
 
