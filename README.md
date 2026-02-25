@@ -1,7 +1,26 @@
 # 2-web-app — Booking Frontend
 
+<!-- CI Status -->
 [![Unit tests](https://github.com/OWNER/REPO/actions/workflows/unit-tests.yml/badge.svg)](https://github.com/OWNER/REPO/actions/workflows/unit-tests.yml)
 [![Integration tests](https://github.com/OWNER/REPO/actions/workflows/integration-tests.yml/badge.svg)](https://github.com/OWNER/REPO/actions/workflows/integration-tests.yml)
+
+<!-- Code Quality -->
+[![ESLint](https://img.shields.io/badge/code%20style-eslint-4B32C3?logo=eslint&logoColor=white)](https://eslint.org/)
+[![Tested with Jest](https://img.shields.io/badge/tested%20with-jest-C21325?logo=jest&logoColor=white)](https://jestjs.io/)
+
+<!-- Version & License -->
+[![GitHub release](https://img.shields.io/github/v/release/OWNER/REPO?include_prereleases)](https://github.com/OWNER/REPO/releases)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+
+<!-- Stack -->
+[![Next.js](https://img.shields.io/badge/Next.js-14-000000?logo=next.js&logoColor=white)](https://nextjs.org/)
+[![Node.js](https://img.shields.io/badge/node-20%2B-339933?logo=node.js&logoColor=white)](https://nodejs.org/)
+[![React](https://img.shields.io/badge/react-18-61DAFB?logo=react&logoColor=black)](https://react.dev/)
+[![Docker](https://img.shields.io/badge/docker-ready-2496ED?logo=docker&logoColor=white)](https://hub.docker.com/)
+
+<!-- Community -->
+[![GitHub issues](https://img.shields.io/github/issues/OWNER/REPO)](https://github.com/OWNER/REPO/issues)
+[![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](https://github.com/OWNER/REPO/pulls)
 
 Next.js 14 flight & hotel booking frontend. All API calls go to the FastAPI backend (`3-backend-app`).
 

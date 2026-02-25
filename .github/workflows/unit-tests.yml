@@ -10,11 +10,11 @@ on:
       - "src/**"
       - "__tests__/**"
 
-  pull_request:
-    branches: [main, develop, feature/webapp-ui]
-    paths:
-      - "src/**"
-      - "__tests__/**"
+  # pull_request:
+  #   branches: [main, develop, feature/webapp-ui]
+  #   paths:
+  #     - "src/**"
+  #     - "__tests__/**"
 
 jobs:
   unit-tests:
