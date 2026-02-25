@@ -1,5 +1,8 @@
 # 2-web-app — Booking Frontend
 
+[![Unit tests](https://github.com/OWNER/REPO/actions/workflows/unit-tests.yml/badge.svg)](https://github.com/OWNER/REPO/actions/workflows/unit-tests.yml)
+[![Integration tests](https://github.com/OWNER/REPO/actions/workflows/integration-tests.yml/badge.svg)](https://github.com/OWNER/REPO/actions/workflows/integration-tests.yml)
+
 Next.js 14 flight & hotel booking frontend. All API calls go to the FastAPI backend (`3-backend-app`).
 
 ---
@@ -25,6 +28,22 @@ See `package.json` for exact versions.
 ### Backend
 
 The app expects the booking API at **`NEXT_PUBLIC_API_BASE_URL`** (default `http://localhost:4000`). Start `3-backend-app` for full functionality.
+
+---
+
+## CI / GitHub Actions
+
+The badges at the top show the latest run status for each workflow. Replace **`OWNER`** and **`REPO`** with your GitHub org/username and repo name (e.g. `ashishsarkar/2-web-app`) so the badges point to your repo.
+
+Workflows live under **`.github/workflows/`** (repo root when this app is the whole repo):
+
+- **`unit-tests.yml`** — runs on push/PR to `main`, `develop`, `feature/webapp-ui` when `src/` or `__tests__/` change; runs `npm run test:unit` (Jest, excludes integration).
+- **`integration-tests.yml`** — same triggers; runs `npm run test:integration` (Jest + MSW in `__tests__/integration/`).
+
+- **`paths:`** — workflow runs only when changed files match these globs (`src/**`, `__tests__/**`). Avoids running frontend CI when only docs or other apps change.
+- **`working-directory:`** — not used here; steps run from the repo root (this frontend app).
+
+If this app lives inside a **monorepo** (e.g. root has `2-web-app`, `3-backend-app`), use a workflow at the **repository root** `.github/workflows/` that runs these tests with `working-directory: 2-web-app` and `paths: 2-web-app/**`.
 
 ---
 
