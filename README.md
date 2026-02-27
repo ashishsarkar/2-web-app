@@ -245,13 +245,40 @@ For CI, use the official Playwright image (e.g. `mcr.microsoft.com/playwright:v1
 
 ---
 
+## Unit test coverage
+
+Tests live next to source files (`*.test.js` / `*.test.jsx`). Run with `npm run test:unit`.
+
+| Test file | Covers |
+|-----------|--------|
+| `components/ui/Button/Button.test.jsx` | Renders, click |
+| `components/ui/Input/Input.test.jsx` | Renders, controlled value |
+| `components/ui/Card/Card.test.jsx` | Renders children |
+| `components/ui/Modal/Modal.test.jsx` | Open/close, children |
+| `components/ui/LocationAutocomplete/LocationAutocomplete.test.jsx` | Input render, dropdown, item select, keyboard (Escape), controlled value, error/disabled |
+| `components/shared/PriceDisplay/PriceDisplay.test.jsx` | Price formatting |
+| `components/booking/FlightItinerary/FlightItinerary.test.jsx` | Booking display |
+| `components/flights/FlightCard/FlightCard.test.jsx` | Airline, route, price, wishlist add/remove |
+| `lib/api/booking.test.js` | `createBooking`, `getBookingById`, `cancelBooking` |
+| `lib/api/flights.test.js` | `searchFlights`, `getFlightById`, error propagation |
+| `lib/api/locations.test.js` | `searchLocations` — params, type filter, size, error |
+| `lib/store/currencyStore.test.js` | `setCurrency`, `format()`, `convert()` |
+| `lib/constants/routes.test.js` | Static routes, dynamic route helpers |
+| `lib/constants/locations.test.js` | `STATIC_LOCATIONS` integrity, `filterStaticLocations` |
+| `lib/validations/flights.test.js` | `flightSearchSchema` — required fields, optional returnDate |
+| `lib/validations/hotels.test.js` | `hotelSearchSchema` — required fields, checkOut > checkIn |
+| `lib/validations/checkout.test.js` | `checkoutSchema` — card, expiry, cvv |
+
+---
+
 ## Project layout
 
 - **`src/app/`** — Next.js App Router (marketing, auth, booking, app routes)
 - **`src/components/`** — UI, shared, flights, hotels, booking, checkout, chatbot, layout
-- **`src/lib/api/`** — API client modules (flights, hotels, booking, confirmations, user, chat)
+- **`src/lib/api/`** — API client modules (flights, hotels, booking, confirmations, user, chat, locations)
 - **`src/lib/store/`** — Zustand stores
 - **`src/lib/validations/`** — Zod schemas
+- **`src/lib/constants/`** — `routes.js`, `locations.js` (static fallback dataset + `filterStaticLocations`)
 - **`__tests__/integration/`** — Integration tests (Jest + MSW)
 - **`e2e/`** — Playwright E2E specs
 - **`mocks/`** — MSW handlers and fixtures

@@ -8,6 +8,7 @@ import { ROUTES } from '@/lib/constants/routes';
 import { flightSearchSchema } from '@/lib/validations/flights';
 import { hotelSearchSchema } from '@/lib/validations/hotels';
 import { z } from 'zod';
+import LocationAutocomplete from '@/components/ui/LocationAutocomplete';
 
 const bundleSearchSchema = z.object({
   destination: z.string().min(1, 'Destination is required'),
@@ -94,24 +95,36 @@ export default function SearchWidget() {
       {activeTab === 'flights' && (
         <form onSubmit={flightForm.handleSubmit(onFlightSubmit)} className="grid grid-cols-1 md:grid-cols-4 gap-4">
           <div>
-            <label className="block text-sm font-medium text-gray-700 mb-1">From</label>
-            <input
-              {...flightForm.register('origin')}
-              type="text"
-              placeholder="e.g. DEL"
-              className={`${inputBase} ${flightForm.formState.errors.origin ? inputError : 'border-gray-300'}`}
+            <label className="block text-sm font-medium text-gray-700 mb-1" htmlFor="flight-origin">From</label>
+            <LocationAutocomplete
+              id="flight-origin"
+              placeholder="City or airport code…"
+              filterType="city"
+              value={flightForm.watch('origin')}
+              onChange={(val) => flightForm.setValue('origin', val, { shouldValidate: true })}
+              onSelect={(loc) => {
+                const val = loc.type === 'city' ? (loc.code || loc.name) : loc.name;
+                flightForm.setValue('origin', val, { shouldValidate: true });
+              }}
+              hasError={!!flightForm.formState.errors.origin}
             />
             {flightForm.formState.errors.origin && (
               <p className="mt-1 text-sm text-red-600">{flightForm.formState.errors.origin.message}</p>
             )}
           </div>
           <div>
-            <label className="block text-sm font-medium text-gray-700 mb-1">To</label>
-            <input
-              {...flightForm.register('destination')}
-              type="text"
-              placeholder="e.g. BOM"
-              className={`${inputBase} ${flightForm.formState.errors.destination ? inputError : 'border-gray-300'}`}
+            <label className="block text-sm font-medium text-gray-700 mb-1" htmlFor="flight-dest">To</label>
+            <LocationAutocomplete
+              id="flight-dest"
+              placeholder="City or airport code…"
+              filterType="city"
+              value={flightForm.watch('destination')}
+              onChange={(val) => flightForm.setValue('destination', val, { shouldValidate: true })}
+              onSelect={(loc) => {
+                const val = loc.type === 'city' ? (loc.code || loc.name) : loc.name;
+                flightForm.setValue('destination', val, { shouldValidate: true });
+              }}
+              hasError={!!flightForm.formState.errors.destination}
             />
             {flightForm.formState.errors.destination && (
               <p className="mt-1 text-sm text-red-600">{flightForm.formState.errors.destination.message}</p>
@@ -138,12 +151,14 @@ export default function SearchWidget() {
       {activeTab === 'hotels' && (
         <form onSubmit={hotelForm.handleSubmit(onHotelSubmit)} className="grid grid-cols-1 md:grid-cols-4 gap-4">
           <div>
-            <label className="block text-sm font-medium text-gray-700 mb-1">Location</label>
-            <input
-              {...hotelForm.register('location')}
-              type="text"
-              placeholder="e.g. Mumbai"
-              className={`${inputBase} ${hotelForm.formState.errors.location ? inputError : 'border-gray-300'}`}
+            <label className="block text-sm font-medium text-gray-700 mb-1" htmlFor="hotel-location">Location</label>
+            <LocationAutocomplete
+              id="hotel-location"
+              placeholder="City, state or country…"
+              value={hotelForm.watch('location')}
+              onChange={(val) => hotelForm.setValue('location', val, { shouldValidate: true })}
+              onSelect={(loc) => hotelForm.setValue('location', loc.name, { shouldValidate: true })}
+              hasError={!!hotelForm.formState.errors.location}
             />
             {hotelForm.formState.errors.location && (
               <p className="mt-1 text-sm text-red-600">{hotelForm.formState.errors.location.message}</p>
@@ -181,12 +196,14 @@ export default function SearchWidget() {
       {activeTab === 'bundle' && (
         <form onSubmit={bundleForm.handleSubmit(onBundleSubmit)} className="grid grid-cols-1 md:grid-cols-5 gap-4">
           <div>
-            <label className="block text-sm font-medium text-gray-700 mb-1">Destination</label>
-            <input
-              {...bundleForm.register('destination')}
-              type="text"
-              placeholder="e.g. BOM or Mumbai"
-              className={`${inputBase} ${bundleForm.formState.errors.destination ? inputError : 'border-gray-300'}`}
+            <label className="block text-sm font-medium text-gray-700 mb-1" htmlFor="bundle-dest">Destination</label>
+            <LocationAutocomplete
+              id="bundle-dest"
+              placeholder="City, airport or country…"
+              value={bundleForm.watch('destination')}
+              onChange={(val) => bundleForm.setValue('destination', val, { shouldValidate: true })}
+              onSelect={(loc) => bundleForm.setValue('destination', loc.code || loc.name, { shouldValidate: true })}
+              hasError={!!bundleForm.formState.errors.destination}
             />
             {bundleForm.formState.errors.destination && (
               <p className="mt-1 text-sm text-red-600">{bundleForm.formState.errors.destination.message}</p>
