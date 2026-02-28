@@ -1,0 +1,27 @@
+title = "Frontend App — Gitleaks Configuration"
+
+[extend]
+  useDefault = true
+
+[[rules]]
+  id = "internal-api-key"
+  description = "Internal API key pattern"
+  regex = '''(?i)(internal[-_]?api[-_]?key)\s*[:=]\s*['"]?([a-z0-9]{32,})['"]?'''
+  tags = ["api", "internal"]
+
+[[rules]]
+  id = "jwt-token"
+  description = "JWT token in source"
+  regex = '''eyJ[A-Za-z0-9-_]+\.eyJ[A-Za-z0-9-_]+\.[A-Za-z0-9-_]+'''
+  tags = ["jwt", "token"]
+
+[allowlist]
+  description = "Global allowlist"
+  paths = [
+    '''node_modules/''',
+    '''\.test\.(ts|tsx|js|jsx)$''',
+    '''\.spec\.(ts|tsx|js|jsx)$''',
+    '''__mocks__/''',
+    '''__tests__/''',
+    '''fixtures/'''
+  ]

@@ -1,0 +1,9 @@
+# CODEOWNERS
+# Changes to pipeline files require security team review
+
+.github/workflows/    @your-org/security-team @your-org/tech-leads
+.gitleaks.toml        @your-org/security-team
+.trivyignore          @your-org/security-team
+suppression.xml       @your-org/security-team
+.semgrepignore        @your-org/security-team
+container-structure-test.yaml  @your-org/tech-leads

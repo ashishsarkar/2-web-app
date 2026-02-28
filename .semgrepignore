@@ -1,0 +1,22 @@
+# .semgrepignore
+# Excludes paths from Semgrep SAST scanning
+# Without this file Semgrep scans node_modules producing thousands of false positives
+
+node_modules/
+dist/
+build/
+coverage/
+.next/
+.nuxt/
+out/
+**/__mocks__/**
+**/__tests__/**
+**/fixtures/**
+**/*.test.ts
+**/*.test.tsx
+**/*.test.js
+**/*.test.jsx
+**/*.spec.ts
+**/*.spec.tsx
+**/*.spec.js
+**/*.spec.jsx

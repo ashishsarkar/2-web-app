@@ -1,0 +1,1029 @@
+# Frontend CI Pipeline — Full Security + Build + Sign Pipeline
+#
+# Required GitHub Secrets:
+# DOCKERHUB_USERNAME, DOCKERHUB_TOKEN
+# COSIGN_PRIVATE_KEY, COSIGN_PASSWORD
+# DEFECTDOJO_URL, DEFECTDOJO_API_KEY, DEFECTDOJO_ENGAGEMENT_ID
+# DTRACK_URL, DTRACK_API_KEY
+# MINIO_ENDPOINT, MINIO_ACCESS_KEY, MINIO_SECRET_KEY
+# NVD_API_KEY
+# SLACK_WEBHOOK_SEC_ALERTS, SLACK_WEBHOOK_BUILD_ALERTS, SLACK_WEBHOOK_DEV_ALERTS
+# REKOR_SERVER (optional — defaults to https://rekor.sigstore.dev)
+
+name: Frontend CI Pipeline
+
+on:
+  push:
+    branches:
+      - "main"
+      - "develop"
+      - "release/**"
+      - "feature/**"
+  pull_request:
+    branches:
+      - "main"
+      - "develop"
+      - "release/**"
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  IMAGE_NAME: ${{ secrets.DOCKERHUB_USERNAME }}/frontend-app
+  NODE_VERSION: "20"
+  COVERAGE_THRESHOLD: "80"
+  TRIVY_SEVERITY: "CRITICAL,HIGH"
+  FAIL_ON_SEVERITY: "CRITICAL"
+  OWASP_FAIL_CVSS: "9"
+
+jobs:
+
+  # ═══════════════════════════════════════════════════════════════════════════
+  # GROUP 1 — Source Code Analysis (ALL PARALLEL — no needs between them)
+  # ═══════════════════════════════════════════════════════════════════════════
+
+  secrets-scan:
+    name: "1.1 | Secrets Scan — Gitleaks"
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Run Gitleaks
+        uses: gitleaks/gitleaks-action@v2
+        with:
+          args: detect --source . --report-format sarif --report-path gitleaks-report.sarif --exit-code 1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Upload SARIF to GitHub Security Tab
+        if: always()
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: gitleaks-report.sarif
+          category: secrets-scanning
+
+      - name: Upload to MinIO
+        if: always()
+        run: |
+          curl -fsSL https://dl.min.io/client/mc/release/linux-amd64/mc -o mc && chmod +x mc
+          ./mc alias set minio "${{ secrets.MINIO_ENDPOINT }}" \
+            "${{ secrets.MINIO_ACCESS_KEY }}" "${{ secrets.MINIO_SECRET_KEY }}"
+          ./mc cp gitleaks-report.sarif \
+            "minio/ci-reports/${{ github.repository }}/${{ github.sha }}/gitleaks-report.sarif"
+
+      - name: Slack alert on failure
+        if: failure()
+        uses: slackapi/slack-github-action@v1.26.0
+        with:
+          webhook-type: incoming-webhook
+          webhook: ${{ secrets.SLACK_WEBHOOK_SEC_ALERTS }}
+          payload: |
+            {"text":"🚨 SECRETS DETECTED in `${{ github.repository }}` — Branch: `${{ github.ref_name }}` — Commit: `${{ github.sha }}` — Pipeline BLOCKED"}
+
+  # ─────────────────────────────────────────────────────────────────────────
+
+  lint-typecheck:
+    name: "1.2 | Lint + Type Check — ESLint / tsc"
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci --prefer-offline
+
+      - name: Install ESLint SARIF formatter
+        run: npm install --no-save @microsoft/eslint-formatter-sarif
+
+      - name: Run ESLint
+        run: npx eslint . --format @microsoft/eslint-formatter-sarif --output-file eslint-report.sarif || true
+
+      - name: Run Prettier check
+        run: npx prettier --check . || true
+
+      - name: Run TypeScript type check
+        run: |
+          if [ -f tsconfig.json ]; then
+            npx tsc --noEmit
+          else
+            echo "No tsconfig.json found — skipping TypeScript type check"
+          fi
+
+      - name: Upload SARIF to GitHub Security Tab
+        if: always()
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: eslint-report.sarif
+          category: eslint
+
+      - name: Upload to MinIO
+        if: always()
+        run: |
+          curl -fsSL https://dl.min.io/client/mc/release/linux-amd64/mc -o mc && chmod +x mc
+          ./mc alias set minio "${{ secrets.MINIO_ENDPOINT }}" \
+            "${{ secrets.MINIO_ACCESS_KEY }}" "${{ secrets.MINIO_SECRET_KEY }}"
+          ./mc cp eslint-report.sarif \
+            "minio/ci-reports/${{ github.repository }}/${{ github.sha }}/eslint-report.sarif"
+
+  # ─────────────────────────────────────────────────────────────────────────
+
+  npm-audit:
+    name: "1.3 | Fast SCA — npm audit"
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci --prefer-offline
+
+      - name: Run npm audit
+        run: npm audit --audit-level=critical --json > npm-audit-report.json || exit 1
+
+      - name: Upload to MinIO
+        if: always()
+        run: |
+          curl -fsSL https://dl.min.io/client/mc/release/linux-amd64/mc -o mc && chmod +x mc
+          ./mc alias set minio "${{ secrets.MINIO_ENDPOINT }}" \
+            "${{ secrets.MINIO_ACCESS_KEY }}" "${{ secrets.MINIO_SECRET_KEY }}"
+          ./mc cp npm-audit-report.json \
+            "minio/ci-reports/${{ github.repository }}/${{ github.sha }}/npm-audit-report.json"
+
+  # ─────────────────────────────────────────────────────────────────────────
+
+  sca-scan:
+    name: "1.4 | Full SCA — OWASP Dependency-Check"
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    needs: [npm-audit]
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Cache OWASP NVD database
+        uses: actions/cache@v4
+        with:
+          path: ~/.dependency-check/data
+          key: owasp-nvd-${{ runner.os }}-${{ hashFiles('**/package-lock.json') }}
+          restore-keys: owasp-nvd-${{ runner.os }}-
+
+      - name: Run OWASP Dependency-Check
+        uses: dependency-check/Dependency-Check_Action@main
+        with:
+          project: frontend-app
+          path: .
+          format: ALL
+          out: owasp-reports
+          args: --failOnCVSS ${{ env.OWASP_FAIL_CVSS }} --enableRetired --nvdApiKey ${{ secrets.NVD_API_KEY }}
+
+      - name: Upload SARIF to GitHub Security Tab
+        if: always()
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: owasp-reports/dependency-check-report.sarif
+          category: sca-owasp
+
+      - name: Import to DefectDojo
+        if: always()
+        run: |
+          curl -X POST "${{ secrets.DEFECTDOJO_URL }}/api/v2/import-scan/" \
+            -H "Authorization: Token ${{ secrets.DEFECTDOJO_API_KEY }}" \
+            -F "scan_type=Dependency Check Scan" \
+            -F "file=@owasp-reports/dependency-check-report.xml" \
+            -F "engagement=${{ secrets.DEFECTDOJO_ENGAGEMENT_ID }}" \
+            -F "active=true" \
+            -F "verified=false" \
+            -F "close_old_findings=true"
+
+      - name: Upload to MinIO
+        if: always()
+        run: |
+          curl -fsSL https://dl.min.io/client/mc/release/linux-amd64/mc -o mc && chmod +x mc
+          ./mc alias set minio "${{ secrets.MINIO_ENDPOINT }}" \
+            "${{ secrets.MINIO_ACCESS_KEY }}" "${{ secrets.MINIO_SECRET_KEY }}"
+          ./mc cp --recursive owasp-reports/ \
+            "minio/ci-reports/${{ github.repository }}/${{ github.sha }}/owasp/"
+
+      - name: Slack alert on failure
+        if: failure()
+        uses: slackapi/slack-github-action@v1.26.0
+        with:
+          webhook-type: incoming-webhook
+          webhook: ${{ secrets.SLACK_WEBHOOK_SEC_ALERTS }}
+          payload: |
+            {"text":"🚨 CRITICAL CVE FOUND (SCA) in `${{ github.repository }}` — Branch: `${{ github.ref_name }}` — Check DefectDojo"}
+
+  # ─────────────────────────────────────────────────────────────────────────
+
+  license-scan:
+    name: "1.5 | License Compliance — license-checker"
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci --prefer-offline
+
+      - name: Generate license report
+        run: npx license-checker --production --json --out license-report.json
+
+      - name: Check for prohibited licenses
+        run: npx license-checker --production --failOn "GPL;AGPL;LGPL;SSPL;EUPL;CPAL;OSL"
+
+      - name: Upload to MinIO
+        if: always()
+        run: |
+          curl -fsSL https://dl.min.io/client/mc/release/linux-amd64/mc -o mc && chmod +x mc
+          ./mc alias set minio "${{ secrets.MINIO_ENDPOINT }}" \
+            "${{ secrets.MINIO_ACCESS_KEY }}" "${{ secrets.MINIO_SECRET_KEY }}"
+          ./mc cp license-report.json \
+            "minio/ci-reports/${{ github.repository }}/${{ github.sha }}/license-report.json"
+
+  # ─────────────────────────────────────────────────────────────────────────
+
+  sast-scan:
+    name: "1.6 | SAST — Semgrep"
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    container:
+      image: returntocorp/semgrep:1.86.0
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Run Semgrep (JSON report)
+        id: semgrep-json
+        continue-on-error: true
+        run: |
+          semgrep scan \
+            --config p/javascript \
+            --config p/typescript \
+            --config p/react \
+            --config p/xss \
+            --config p/owasp-top-ten \
+            --json --output semgrep-report.json \
+            --error
+
+      - name: Run Semgrep (SARIF report)
+        if: always()
+        run: |
+          semgrep scan \
+            --config p/javascript \
+            --config p/typescript \
+            --config p/react \
+            --config p/xss \
+            --config p/owasp-top-ten \
+            --sarif --output semgrep-report.sarif || true
+
+      - name: Upload SARIF to GitHub Security Tab
+        if: always()
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: semgrep-report.sarif
+          category: sast-semgrep
+
+      - name: Import to DefectDojo
+        if: always()
+        run: |
+          curl -X POST "${{ secrets.DEFECTDOJO_URL }}/api/v2/import-scan/" \
+            -H "Authorization: Token ${{ secrets.DEFECTDOJO_API_KEY }}" \
+            -F "scan_type=Semgrep JSON Report" \
+            -F "file=@semgrep-report.json" \
+            -F "engagement=${{ secrets.DEFECTDOJO_ENGAGEMENT_ID }}" \
+            -F "active=true" \
+            -F "verified=false"
+
+      - name: Upload to MinIO
+        if: always()
+        run: |
+          curl -fsSL https://dl.min.io/client/mc/release/linux-amd64/mc -o mc && chmod +x mc
+          ./mc alias set minio "${{ secrets.MINIO_ENDPOINT }}" \
+            "${{ secrets.MINIO_ACCESS_KEY }}" "${{ secrets.MINIO_SECRET_KEY }}"
+          ./mc cp semgrep-report.sarif \
+            "minio/ci-reports/${{ github.repository }}/${{ github.sha }}/semgrep-report.sarif"
+          ./mc cp semgrep-report.json \
+            "minio/ci-reports/${{ github.repository }}/${{ github.sha }}/semgrep-report.json"
+
+      - name: Fail if Semgrep found issues
+        if: steps.semgrep-json.outcome == 'failure'
+        run: exit 1
+
+      - name: Slack alert on failure
+        if: failure()
+        uses: slackapi/slack-github-action@v1.26.0
+        with:
+          webhook-type: incoming-webhook
+          webhook: ${{ secrets.SLACK_WEBHOOK_DEV_ALERTS }}
+          payload: |
+            {"text":"⚠️ SAST FAILURE (Semgrep) in `${{ github.repository }}` — Branch: `${{ github.ref_name }}` — Review GitHub Security Tab"}
+
+  # ─────────────────────────────────────────────────────────────────────────
+
+  sbom-source:
+    name: "1.7 | SBOM (Source) — Syft"
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Syft
+        uses: anchore/sbom-action/download-syft@v0
+
+      - name: Generate SBOM
+        run: |
+          syft dir:. \
+            --output cyclonedx-json=sbom-source.cdx.json \
+            --output spdx-json=sbom-source.spdx.json
+
+      - name: Upload to Dependency-Track
+        run: |
+          curl -X POST "${{ secrets.DTRACK_URL }}/api/v1/bom" \
+            -H "X-Api-Key: ${{ secrets.DTRACK_API_KEY }}" \
+            -F "autoCreate=true" \
+            -F "projectName=frontend-app" \
+            -F "projectVersion=${{ github.ref_name }}" \
+            -F "bom=@sbom-source.cdx.json"
+
+      - name: Upload to MinIO
+        if: always()
+        run: |
+          curl -fsSL https://dl.min.io/client/mc/release/linux-amd64/mc -o mc && chmod +x mc
+          ./mc alias set minio "${{ secrets.MINIO_ENDPOINT }}" \
+            "${{ secrets.MINIO_ACCESS_KEY }}" "${{ secrets.MINIO_SECRET_KEY }}"
+          ./mc cp sbom-source.cdx.json \
+            "minio/ci-reports/${{ github.repository }}/${{ github.sha }}/sbom-source.cdx.json"
+          ./mc cp sbom-source.spdx.json \
+            "minio/ci-reports/${{ github.repository }}/${{ github.sha }}/sbom-source.spdx.json"
+
+      - name: Upload as GitHub Actions artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: sbom-source
+          path: |
+            sbom-source.cdx.json
+            sbom-source.spdx.json
+          retention-days: 90
+
+  # ═══════════════════════════════════════════════════════════════════════════
+  # GROUP 2 — Unit Tests (PARALLEL with Group 1)
+  # ═══════════════════════════════════════════════════════════════════════════
+
+  unit-tests:
+    name: "2.1 | Unit Tests + Coverage — Jest / Istanbul"
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci --prefer-offline
+
+      - name: Install Jest JUnit reporter
+        run: npm install --no-save jest-junit
+
+      - name: Run Jest with coverage
+        env:
+          JEST_JUNIT_OUTPUT_DIR: "."
+          JEST_JUNIT_OUTPUT_NAME: "test-results.xml"
+        run: |
+          npx jest \
+            --coverage \
+            --coverageReporters=lcov \
+            --coverageReporters=json \
+            --coverageReporters=html \
+            --coverageThreshold='{"global":{"lines":80,"functions":80,"branches":80,"statements":80}}' \
+            --reporters=default \
+            --reporters=jest-junit
+
+      - name: Upload coverage to MinIO
+        if: always()
+        run: |
+          curl -fsSL https://dl.min.io/client/mc/release/linux-amd64/mc -o mc && chmod +x mc
+          ./mc alias set minio "${{ secrets.MINIO_ENDPOINT }}" \
+            "${{ secrets.MINIO_ACCESS_KEY }}" "${{ secrets.MINIO_SECRET_KEY }}"
+          ./mc cp --recursive coverage/ \
+            "minio/ci-reports/${{ github.repository }}/${{ github.sha }}/coverage/"
+
+      - name: Upload test results as artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-results
+          path: |
+            test-results.xml
+            coverage/
+          retention-days: 90
+
+      - name: Slack alert on failure
+        if: failure()
+        uses: slackapi/slack-github-action@v1.26.0
+        with:
+          webhook-type: incoming-webhook
+          webhook: ${{ secrets.SLACK_WEBHOOK_DEV_ALERTS }}
+          payload: |
+            {"text":"❌ UNIT TESTS FAILED in `${{ github.repository }}` — Branch: `${{ github.ref_name }}` — Coverage may be below ${{ env.COVERAGE_THRESHOLD }}%"}
+
+  # ═══════════════════════════════════════════════════════════════════════════
+  # GROUP 3 — Dockerfile Scanning (PARALLEL with Groups 1+2)
+  # ═══════════════════════════════════════════════════════════════════════════
+
+  dockerfile-lint:
+    name: "3.1 | Dockerfile Lint — Hadolint"
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Run Hadolint
+        uses: hadolint/hadolint-action@v3.1.0
+        with:
+          dockerfile: Dockerfile
+          format: sarif
+          output-file: hadolint-report.sarif
+          failure-threshold: error
+
+      - name: Upload SARIF to GitHub Security Tab
+        if: always()
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: hadolint-report.sarif
+          category: dockerfile-lint
+
+      - name: Upload to MinIO
+        if: always()
+        run: |
+          curl -fsSL https://dl.min.io/client/mc/release/linux-amd64/mc -o mc && chmod +x mc
+          ./mc alias set minio "${{ secrets.MINIO_ENDPOINT }}" \
+            "${{ secrets.MINIO_ACCESS_KEY }}" "${{ secrets.MINIO_SECRET_KEY }}"
+          ./mc cp hadolint-report.sarif \
+            "minio/ci-reports/${{ github.repository }}/${{ github.sha }}/hadolint-report.sarif"
+
+  # ─────────────────────────────────────────────────────────────────────────
+
+  dockerfile-misconfig:
+    name: "3.2 | Dockerfile Misconfig — Trivy"
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Run Trivy config scan
+        uses: aquasecurity/trivy-action@master
+        with:
+          scan-type: config
+          scan-ref: .
+          format: sarif
+          output: trivy-dockerfile-report.sarif
+          severity: ${{ env.TRIVY_SEVERITY }}
+          exit-code: "1"
+
+      - name: Upload SARIF to GitHub Security Tab
+        if: always()
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: trivy-dockerfile-report.sarif
+          category: dockerfile-trivy
+
+      - name: Upload to MinIO
+        if: always()
+        run: |
+          curl -fsSL https://dl.min.io/client/mc/release/linux-amd64/mc -o mc && chmod +x mc
+          ./mc alias set minio "${{ secrets.MINIO_ENDPOINT }}" \
+            "${{ secrets.MINIO_ACCESS_KEY }}" "${{ secrets.MINIO_SECRET_KEY }}"
+          ./mc cp trivy-dockerfile-report.sarif \
+            "minio/ci-reports/${{ github.repository }}/${{ github.sha }}/trivy-dockerfile-report.sarif"
+
+  # ═══════════════════════════════════════════════════════════════════════════
+  # GROUP 4 — Build (SEQUENTIAL — waits for ALL of Groups 1+2+3)
+  # ═══════════════════════════════════════════════════════════════════════════
+
+  build:
+    name: "4.1 | Docker Build — Buildx"
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      id-token: write
+      packages: write
+    needs:
+      - secrets-scan
+      - lint-typecheck
+      - sca-scan
+      - license-scan
+      - sast-scan
+      - sbom-source
+      - unit-tests
+      - dockerfile-lint
+      - dockerfile-misconfig
+    outputs:
+      image-digest: ${{ steps.build.outputs.digest }}
+      image-tags: ${{ steps.meta.outputs.tags }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Generate metadata and tags
+        uses: docker/metadata-action@v5
+        id: meta
+        with:
+          images: ${{ env.IMAGE_NAME }}
+          tags: |
+            type=sha,prefix=sha-,format=short
+            type=ref,event=branch
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+
+      - name: Login to Docker Hub
+        if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/heads/release/') || github.ref == 'refs/heads/develop'
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Build image
+        uses: docker/build-push-action@v5
+        id: build
+        with:
+          context: .
+          push: false
+          load: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          provenance: true
+          sbom: true
+
+      - name: Save image to tarball
+        run: |
+          SHORT_SHA="${GITHUB_SHA::7}"
+          docker save "${{ env.IMAGE_NAME }}:sha-${SHORT_SHA}" -o image.tar
+
+      - name: Upload image tarball
+        uses: actions/upload-artifact@v4
+        with:
+          name: docker-image
+          path: image.tar
+          retention-days: 1
+
+      - name: Slack alert on failure
+        if: failure()
+        uses: slackapi/slack-github-action@v1.26.0
+        with:
+          webhook-type: incoming-webhook
+          webhook: ${{ secrets.SLACK_WEBHOOK_BUILD_ALERTS }}
+          payload: |
+            {"text":"🔨 BUILD FAILED in `${{ github.repository }}` — Branch: `${{ github.ref_name }}` — Commit: `${{ github.sha }}`"}
+
+  # ═══════════════════════════════════════════════════════════════════════════
+  # GROUP 5 — Image Verification (ALL PARALLEL — each needs: [build])
+  # ═══════════════════════════════════════════════════════════════════════════
+
+  image-scan:
+    name: "5.1 | Container Image Scan — Trivy"
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    needs: [build]
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download docker-image artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: docker-image
+
+      - name: Load image
+        run: docker load -i image.tar
+
+      - name: Set image ref
+        id: vars
+        run: echo "image-ref=${{ env.IMAGE_NAME }}:sha-${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
+
+      - name: Run Trivy image scan (SARIF)
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: ${{ steps.vars.outputs.image-ref }}
+          format: sarif
+          output: trivy-image-report.sarif
+          severity: ${{ env.TRIVY_SEVERITY }}
+          exit-code: "1"
+          vuln-type: os,library
+          ignore-unfixed: false
+
+      - name: Run Trivy image scan (CycloneDX)
+        if: always()
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: ${{ steps.vars.outputs.image-ref }}
+          format: cyclonedx
+          output: trivy-image-sbom.cdx.json
+          exit-code: "0"
+
+      - name: Upload SARIF to GitHub Security Tab
+        if: always()
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: trivy-image-report.sarif
+          category: container-image-trivy
+
+      - name: Import to DefectDojo
+        if: always()
+        run: |
+          curl -X POST "${{ secrets.DEFECTDOJO_URL }}/api/v2/import-scan/" \
+            -H "Authorization: Token ${{ secrets.DEFECTDOJO_API_KEY }}" \
+            -F "scan_type=Trivy Operator Scan" \
+            -F "file=@trivy-image-report.sarif" \
+            -F "engagement=${{ secrets.DEFECTDOJO_ENGAGEMENT_ID }}" \
+            -F "active=true" \
+            -F "verified=false" \
+            -F "close_old_findings=true"
+
+      - name: Upload to Dependency-Track
+        if: always()
+        run: |
+          curl -X POST "${{ secrets.DTRACK_URL }}/api/v1/bom" \
+            -H "X-Api-Key: ${{ secrets.DTRACK_API_KEY }}" \
+            -F "autoCreate=true" \
+            -F "projectName=frontend-app-image" \
+            -F "projectVersion=${{ github.sha }}" \
+            -F "bom=@trivy-image-sbom.cdx.json"
+
+      - name: Upload to MinIO
+        if: always()
+        run: |
+          curl -fsSL https://dl.min.io/client/mc/release/linux-amd64/mc -o mc && chmod +x mc
+          ./mc alias set minio "${{ secrets.MINIO_ENDPOINT }}" \
+            "${{ secrets.MINIO_ACCESS_KEY }}" "${{ secrets.MINIO_SECRET_KEY }}"
+          ./mc cp trivy-image-report.sarif \
+            "minio/ci-reports/${{ github.repository }}/${{ github.sha }}/trivy-image-report.sarif"
+          ./mc cp trivy-image-sbom.cdx.json \
+            "minio/ci-reports/${{ github.repository }}/${{ github.sha }}/trivy-image-sbom.cdx.json"
+
+      - name: Slack alert on failure
+        if: failure()
+        uses: slackapi/slack-github-action@v1.26.0
+        with:
+          webhook-type: incoming-webhook
+          webhook: ${{ secrets.SLACK_WEBHOOK_SEC_ALERTS }}
+          payload: |
+            {"text":"🚨 CRITICAL CVE IN CONTAINER IMAGE — `${{ github.repository }}` — Branch: `${{ github.ref_name }}` — Image NOT promoted"}
+
+  # ─────────────────────────────────────────────────────────────────────────
+
+  container-structure-test:
+    name: "5.2 | Container Validation — Structure Test"
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    needs: [build]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download docker-image artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: docker-image
+
+      - name: Load image
+        run: docker load -i image.tar
+
+      - name: Install Container Structure Test
+        run: |
+          curl -LO https://storage.googleapis.com/container-structure-test/latest/container-structure-test-linux-amd64
+          chmod +x container-structure-test-linux-amd64
+          sudo mv container-structure-test-linux-amd64 /usr/local/bin/container-structure-test
+
+      - name: Run structure tests
+        run: |
+          SHORT_SHA="${GITHUB_SHA::7}"
+          container-structure-test test \
+            --image "${{ env.IMAGE_NAME }}:sha-${SHORT_SHA}" \
+            --config container-structure-test.yaml \
+            --output json > structure-test-results.json
+
+      - name: Upload to MinIO
+        if: always()
+        run: |
+          curl -fsSL https://dl.min.io/client/mc/release/linux-amd64/mc -o mc && chmod +x mc
+          ./mc alias set minio "${{ secrets.MINIO_ENDPOINT }}" \
+            "${{ secrets.MINIO_ACCESS_KEY }}" "${{ secrets.MINIO_SECRET_KEY }}"
+          ./mc cp structure-test-results.json \
+            "minio/ci-reports/${{ github.repository }}/${{ github.sha }}/structure-test-results.json"
+
+      - name: Upload as GitHub Actions artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: structure-test-results
+          path: structure-test-results.json
+          retention-days: 90
+
+  # ─────────────────────────────────────────────────────────────────────────
+
+  sbom-image:
+    name: "5.3 | SBOM (Image) — Syft"
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    needs: [build]
+    steps:
+      - name: Download docker-image artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: docker-image
+
+      - name: Load image
+        run: docker load -i image.tar
+
+      - name: Install Syft
+        uses: anchore/sbom-action/download-syft@v0
+
+      - name: Generate SBOM from image
+        run: |
+          SHORT_SHA="${GITHUB_SHA::7}"
+          syft "${{ env.IMAGE_NAME }}:sha-${SHORT_SHA}" \
+            --output cyclonedx-json=sbom-image.cdx.json \
+            --output spdx-json=sbom-image.spdx.json
+
+      - name: Upload as GitHub Actions artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: sbom-image
+          path: |
+            sbom-image.cdx.json
+            sbom-image.spdx.json
+          retention-days: 90
+
+      - name: Upload to MinIO
+        if: always()
+        run: |
+          curl -fsSL https://dl.min.io/client/mc/release/linux-amd64/mc -o mc && chmod +x mc
+          ./mc alias set minio "${{ secrets.MINIO_ENDPOINT }}" \
+            "${{ secrets.MINIO_ACCESS_KEY }}" "${{ secrets.MINIO_SECRET_KEY }}"
+          ./mc cp sbom-image.cdx.json \
+            "minio/ci-reports/${{ github.repository }}/${{ github.sha }}/sbom-image.cdx.json"
+          ./mc cp sbom-image.spdx.json \
+            "minio/ci-reports/${{ github.repository }}/${{ github.sha }}/sbom-image.spdx.json"
+
+  # ═══════════════════════════════════════════════════════════════════════════
+  # GROUP 6 — Sign, Attest and Push (SEQUENTIAL — main + release/* + develop)
+  # ═══════════════════════════════════════════════════════════════════════════
+
+  push-image:
+    name: "6.1 | Push Image — Docker Hub"
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/heads/release/') || github.ref == 'refs/heads/develop'
+    needs: [image-scan, container-structure-test, sbom-image]
+    permissions:
+      contents: read
+      id-token: write
+      packages: write
+    outputs:
+      image-digest: ${{ steps.push.outputs.digest }}
+      image-ref: ${{ env.IMAGE_NAME }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download docker-image artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: docker-image
+
+      - name: Load image
+        run: docker load -i image.tar
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Generate metadata
+        uses: docker/metadata-action@v5
+        id: meta
+        with:
+          images: ${{ env.IMAGE_NAME }}
+          tags: |
+            type=sha,prefix=sha-,format=short
+            type=ref,event=branch
+            type=semver,pattern={{version}}
+
+      - name: Push image
+        uses: docker/build-push-action@v5
+        id: push
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+
+  # ─────────────────────────────────────────────────────────────────────────
+
+  sign-image:
+    name: "6.2 | Container Sign — Cosign"
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/heads/release/') || github.ref == 'refs/heads/develop'
+    needs: [push-image]
+    permissions:
+      contents: read
+      id-token: write
+      packages: write
+    steps:
+      - name: Install Cosign
+        uses: sigstore/cosign-installer@v3
+
+      - name: Login to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Sign image
+        run: |
+          cosign sign --yes \
+            --rekor-url "${{ secrets.REKOR_SERVER && secrets.REKOR_SERVER || 'https://rekor.sigstore.dev' }}" \
+            "${{ env.IMAGE_NAME }}@${{ needs.push-image.outputs.image-digest }}"
+        env:
+          COSIGN_EXPERIMENTAL: "1"
+
+  # ─────────────────────────────────────────────────────────────────────────
+
+  attest-sbom:
+    name: "6.3 | SBOM Attestation — Cosign attest"
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/heads/release/') || github.ref == 'refs/heads/develop'
+    needs: [sign-image, push-image]
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Install Cosign
+        uses: sigstore/cosign-installer@v3
+
+      - name: Download SBOM artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: sbom-image
+
+      - name: Login to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Attach SBOM attestation
+        run: |
+          cosign attest --yes \
+            --rekor-url "${{ secrets.REKOR_SERVER && secrets.REKOR_SERVER || 'https://rekor.sigstore.dev' }}" \
+            --predicate sbom-image.cdx.json \
+            --type cyclonedx \
+            "${{ env.IMAGE_NAME }}@${{ needs.push-image.outputs.image-digest }}"
+        env:
+          COSIGN_EXPERIMENTAL: "1"
+
+  # ─────────────────────────────────────────────────────────────────────────
+
+  slsa-provenance:
+    name: "6.4 | SLSA Provenance — slsa-github-generator"
+    if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/heads/release/') || github.ref == 'refs/heads/develop'
+    needs: [push-image]
+    permissions:
+      contents: read
+      id-token: write
+      actions: read
+    uses: slsa-framework/slsa-github-generator/.github/workflows/generator_container_slsa3.yml@v2.0.0
+    with:
+      image: ${{ needs.push-image.outputs.image-ref }}
+      digest: ${{ needs.push-image.outputs.image-digest }}
+      registry-username: ${{ secrets.DOCKERHUB_USERNAME }}
+    secrets:
+      registry-password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+  # ─────────────────────────────────────────────────────────────────────────
+
+  verify-signature:
+    name: "6.5 | Signature Verify — Cosign verify"
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/heads/release/') || github.ref == 'refs/heads/develop'
+    needs: [attest-sbom, slsa-provenance, push-image]
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Install Cosign
+        uses: sigstore/cosign-installer@v3
+
+      - name: Login to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Verify image signature
+        run: |
+          cosign verify \
+            --rekor-url "${{ secrets.REKOR_SERVER && secrets.REKOR_SERVER || 'https://rekor.sigstore.dev' }}" \
+            --certificate-identity-regexp "https://github.com/${{ github.repository }}/*" \
+            --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
+            "${{ env.IMAGE_NAME }}@${{ needs.push-image.outputs.image-digest }}"
+        env:
+          COSIGN_EXPERIMENTAL: "1"
+
+      - name: Verify SBOM attestation
+        run: |
+          cosign verify-attestation \
+            --rekor-url "${{ secrets.REKOR_SERVER && secrets.REKOR_SERVER || 'https://rekor.sigstore.dev' }}" \
+            --type cyclonedx \
+            --certificate-identity-regexp "https://github.com/${{ github.repository }}/*" \
+            --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
+            "${{ env.IMAGE_NAME }}@${{ needs.push-image.outputs.image-digest }}"
+        env:
+          COSIGN_EXPERIMENTAL: "1"
+
+      - name: Slack success notification
+        if: success()
+        uses: slackapi/slack-github-action@v1.26.0
+        with:
+          webhook-type: incoming-webhook
+          webhook: ${{ secrets.SLACK_WEBHOOK_BUILD_ALERTS }}
+          payload: |
+            {"text":"✅ CI PIPELINE COMPLETE — `${{ github.repository }}` — Branch: `${{ github.ref_name }}` — Image signed and verified. Digest: `${{ needs.push-image.outputs.image-digest }}`"}
+
+      - name: Slack failure notification
+        if: failure()
+        uses: slackapi/slack-github-action@v1.26.0
+        with:
+          webhook-type: incoming-webhook
+          webhook: ${{ secrets.SLACK_WEBHOOK_SEC_ALERTS }}
+          payload: |
+            {"text":"🚨 SIGNATURE VERIFICATION FAILED — `${{ github.repository }}` — Branch: `${{ github.ref_name }}` — Immediate investigation required"}

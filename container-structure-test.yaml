@@ -1,0 +1,47 @@
+# container-structure-test.yaml
+# Used by Job 5.2 (Container Structure Test)
+# Validates the built container image structure before it is pushed to registry
+# Paths and ports matched to actual 2-web-app Dockerfile output
+
+schemaVersion: 2.0.0
+
+metadataTest:
+  exposedPorts:
+    - "3000"
+  env:
+    - key: "PORT"
+      value: "3000"
+    - key: "HOSTNAME"
+      value: "0.0.0.0"
+
+fileExistenceTests:
+  - name: "package.json exists"
+    path: "/app/package.json"
+    shouldExist: true
+
+  - name: "node_modules installed"
+    path: "/app/node_modules"
+    shouldExist: true
+
+  - name: "Source directory exists"
+    path: "/app/src"
+    shouldExist: true
+
+  - name: "Next.js config exists"
+    path: "/app/next.config.js"
+    shouldExist: true
+
+  - name: "Jest config exists"
+    path: "/app/jest.config.js"
+    shouldExist: true
+
+commandTests:
+  - name: "Node version is 20"
+    command: "node"
+    args: ["--version"]
+    expectedOutput: ["v20\\..*"]
+
+  - name: "npm is available"
+    command: "npm"
+    args: ["--version"]
+    exitCode: 0

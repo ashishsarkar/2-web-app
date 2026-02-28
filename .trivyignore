@@ -1,0 +1,14 @@
+# .trivyignore
+# Trivy CVE suppression file
+#
+# RULES:
+# 1. Every suppression MUST have a justification comment
+# 2. Every suppression MUST have a review due date (max 6 months from entry date)
+# 3. No CRITICAL CVEs with available fixes may be suppressed
+# 4. Suppressions with expired review dates must be re-evaluated immediately
+#
+# FORMAT:
+# CVE-YYYY-NNNNN  # Reason: [why this is suppressed]
+#                 # Reviewed by: [name] | Date: YYYY-MM-DD | Due: YYYY-MM-DD
+#
+# --- Add suppressions below this line only after baseline scan review ---
