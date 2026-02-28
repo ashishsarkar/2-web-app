@@ -54,13 +54,41 @@ The app expects the booking API at **`NEXT_PUBLIC_API_BASE_URL`** (default `http
 
 The badges at the top show the live run status for each workflow, pulled directly from GitHub Actions for `ashishsarkar/2-web-app`.
 
-Workflows live under **`.github/workflows/`** (repo root when this app is the whole repo):
+Workflows live under **`.github/workflows/`**:
 
 - **`unit-tests.yml`** — runs on push/PR to `main`, `develop`, `feature/webapp-ui` when `src/` or `__tests__/` change; runs `npm run test:unit` (Jest, excludes integration).
 - **`integration-tests.yml`** — same triggers; runs `npm run test:integration` (Jest + MSW in `__tests__/integration/`).
+- **`frontend-ci.yml`** — full security + build + sign pipeline (19 jobs across 6 groups). See below.
 
-- **`paths:`** — workflow runs only when changed files match these globs (`src/**`, `__tests__/**`). Avoids running frontend CI when only docs or other apps change.
-- **`working-directory:`** — not used here; steps run from the repo root (this frontend app).
+### Frontend CI Pipeline (`frontend-ci.yml`)
+
+A comprehensive CI pipeline triggered on push to `main`, `develop`, `release/**`, `feature/**` and PRs to `main`, `develop`, `release/**`.
+
+| Group | Jobs | Tools |
+|-------|------|-------|
+| **1 — Source Analysis** | Secrets scan, Lint/typecheck, SCA, SBOM generation, Dependency-Track upload, SAST | Gitleaks, ESLint/tsc, OWASP Dependency-Check, npm audit, Syft, Semgrep |
+| **2 — Unit Testing** | Jest unit tests with coverage | Jest, Istanbul |
+| **3 — Dockerfile Scan** | Hadolint lint, Trivy config scan | Hadolint, Trivy |
+| **4 — Build** | Docker image build with BuildKit | Docker Buildx |
+| **5 — Image Scan** | Trivy container image vulnerability scan | Trivy |
+| **6 — Publish & Sign** | Push to registry, Cosign signing, SBOM attestation, SLSA provenance, signature verification | Docker Hub, Cosign, Syft, slsa-github-generator, Rekor |
+
+Group 6 runs only on `main`, `develop`, and `release/**` branches (not on feature branches or PRs).
+
+**CI config files in this project:**
+
+| File | Purpose |
+|------|---------|
+| `.gitleaks.toml` | Gitleaks rules and allowlists |
+| `.semgrepignore` | Semgrep scan exclusions |
+| `.trivyignore` | Trivy CVE suppressions |
+| `suppression.xml` | OWASP Dependency-Check false positive suppressions |
+| `container-structure-test.yaml` | Google Container Structure Test assertions |
+| `.github/dependabot.yml` | Automated dependency updates (npm + GitHub Actions) |
+| `.github/CODEOWNERS` | Required reviewers for CI/security file changes |
+| `SECRETS.md` | All 17 required GitHub Actions secrets with setup instructions |
+
+**CI infrastructure services** (DefectDojo, Dependency-Track, MinIO, Container Registry) are in `5-ci-infra/`. See `5-ci-infra/README.md`.
 
 If this app lives inside a **monorepo** (e.g. root has `2-web-app`, `3-backend-app`), use a workflow at the **repository root** `.github/workflows/` that runs these tests with `working-directory: 2-web-app` and `paths: 2-web-app/**`.
 
@@ -295,3 +323,5 @@ Tests live next to source files (`*.test.js` / `*.test.jsx`). Run with `npm run 
 ## Docs
 
 - **CURSOR.md** — Project context, routes, API table, conventions, and how to run/tests/Docker for AI and handoff.
+- **SECRETS.md** — CI pipeline secrets inventory (17 GitHub Actions secrets with sources, rotation policies, and setup).
+- **`5-ci-infra/README.md`** — CI infrastructure stack (DefectDojo, Dependency-Track, MinIO, Container Registry) with credentials and how to run.
