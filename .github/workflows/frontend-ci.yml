@@ -187,6 +187,7 @@ jobs:
     runs-on: [self-hosted, macOS]
     timeout-minutes: 30
     needs: [npm-audit]
+    if: always()
     permissions:
       contents: read
       security-events: write
@@ -260,6 +261,7 @@ jobs:
   license-scan:
     name: "1.5 | License Compliance — license-checker"
     needs: [sca-scan, secrets-scan, lint-typecheck]
+    if: always()
     runs-on: [self-hosted, macOS]
     timeout-minutes: 10
     steps:
@@ -295,6 +297,7 @@ jobs:
   sast-scan:
     name: "1.6 | SAST — Semgrep"
     needs: [sca-scan, secrets-scan, lint-typecheck]
+    if: always()
     runs-on: [self-hosted, macOS]
     timeout-minutes: 15
     permissions:
@@ -379,6 +382,7 @@ jobs:
   sbom-source:
     name: "1.7 | SBOM (Source) — Syft"
     needs: [sca-scan, secrets-scan, lint-typecheck]
+    if: always()
     runs-on: [self-hosted, macOS]
     timeout-minutes: 10
     steps:
