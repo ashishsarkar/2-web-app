@@ -43,7 +43,7 @@ env:
 jobs:
 
   # ═══════════════════════════════════════════════════════════════════════════
-  # GROUP 1 — Source Code Analysis (ALL PARALLEL — no needs between them)
+  # GROUP 1 — Source Code Analysis (SEQUENTIAL: 1.1 → 1.2 → 1.3 → 1.4 → 1.5 → 1.6 → 1.7)
   # ═══════════════════════════════════════════════════════════════════════════
 
   secrets-scan:
@@ -95,6 +95,7 @@ jobs:
 
   lint-typecheck:
     name: "1.2 | Lint + Type Check — ESLint / tsc"
+    needs: [secrets-scan]
     runs-on: [self-hosted, macOS]
     timeout-minutes: 10
     permissions:
@@ -150,6 +151,7 @@ jobs:
 
   npm-audit:
     name: "1.3 | Fast SCA — npm audit"
+    needs: [lint-typecheck]
     runs-on: [self-hosted, macOS]
     timeout-minutes: 5
     steps:
@@ -256,6 +258,7 @@ jobs:
 
   license-scan:
     name: "1.5 | License Compliance — license-checker"
+    needs: [sca-scan]
     runs-on: [self-hosted, macOS]
     timeout-minutes: 10
     steps:
@@ -290,6 +293,7 @@ jobs:
 
   sast-scan:
     name: "1.6 | SAST — Semgrep"
+    needs: [license-scan]
     runs-on: [self-hosted, macOS]
     timeout-minutes: 15
     permissions:
@@ -372,6 +376,7 @@ jobs:
 
   sbom-source:
     name: "1.7 | SBOM (Source) — Syft"
+    needs: [sast-scan]
     runs-on: [self-hosted, macOS]
     timeout-minutes: 10
     steps:
