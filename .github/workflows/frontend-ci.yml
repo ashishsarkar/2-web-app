@@ -4,6 +4,7 @@
 # HARBOR_REGISTRY (e.g. harbor.example.com)
 # HARBOR_PROJECT  (e.g. library)
 # HARBOR_USERNAME, HARBOR_PASSWORD (or robot account token)
+# Variables (Settings → Secrets and variables → Actions): HARBOR_USERNAME (for SLSA job 6.4)
 # COSIGN_PRIVATE_KEY, COSIGN_PASSWORD
 # DEFECTDOJO_URL, DEFECTDOJO_API_KEY, DEFECTDOJO_ENGAGEMENT_ID
 # DTRACK_URL, DTRACK_API_KEY
@@ -428,636 +429,635 @@ jobs:
           retention-days: 90
 
   # ═══════════════════════════════════════════════════════════════════════════
-  # GROUPS 2–6 — COMMENTED OUT (enable after Group 1 is verified)
-  # Uncomment each group progressively: Group 2 → 3 → 4 → 5 → 6
+  # GROUP 2 — Unit Tests (PARALLEL with Group 1)
   # ═══════════════════════════════════════════════════════════════════════════
 
-  # # ═══════════════════════════════════════════════════════════════════════════
-  # # GROUP 2 — Unit Tests (PARALLEL with Group 1)
-  # # ═══════════════════════════════════════════════════════════════════════════
-  #
-  # unit-tests:
-  #   name: "2.1 | Unit Tests + Coverage — Jest / Istanbul"
-  #   runs-on: [self-hosted, macOS]
-  #   timeout-minutes: 15
-  #   steps:
-  #     - name: Checkout
-  #       uses: actions/checkout@v4
-  #
-  #     - name: Setup Node.js
-  #       uses: actions/setup-node@v4
-  #       with:
-  #         node-version: ${{ env.NODE_VERSION }}
-  #         cache: npm
-  #
-  #     - name: Install dependencies
-  #       run: npm ci --prefer-offline
-  #
-  #     - name: Install Jest JUnit reporter
-  #       run: npm install --no-save jest-junit
-  #
-  #     - name: Run Jest with coverage
-  #       env:
-  #         JEST_JUNIT_OUTPUT_DIR: "."
-  #         JEST_JUNIT_OUTPUT_NAME: "test-results.xml"
-  #       run: |
-  #         npx jest \
-  #           --coverage \
-  #           --coverageReporters=lcov \
-  #           --coverageReporters=json \
-  #           --coverageReporters=html \
-  #           --coverageThreshold='{"global":{"lines":80,"functions":80,"branches":80,"statements":80}}' \
-  #           --reporters=default \
-  #           --reporters=jest-junit
-  #
-  #     - name: Upload coverage to MinIO
-  #       if: always()
-  #       run: |
-  #         curl -fsSL https://dl.min.io/client/mc/release/darwin-arm64/mc -o mc && chmod +x mc
-  #         ./mc alias set minio "${{ secrets.MINIO_ENDPOINT }}" \
-  #           "${{ secrets.MINIO_ACCESS_KEY }}" "${{ secrets.MINIO_SECRET_KEY }}"
-  #         ./mc cp --recursive coverage/ \
-  #           "minio/ci-reports/${{ github.repository }}/${{ github.sha }}/coverage/"
-  #
-  #     - name: Upload test results as artifact
-  #       if: always()
-  #       uses: actions/upload-artifact@v4
-  #       with:
-  #         name: test-results
-  #         path: |
-  #           test-results.xml
-  #           coverage/
-  #         retention-days: 90
-  #
-  #     - name: Slack alert on failure
-  #       if: failure()
-  #       uses: slackapi/slack-github-action@v1.26.0
-  #       with:
-  #         webhook-type: incoming-webhook
-  #         webhook: ${{ secrets.SLACK_WEBHOOK_DEV_ALERTS }}
-  #         payload: |
-  #           {"text":"❌ UNIT TESTS FAILED in `${{ github.repository }}` — Branch: `${{ github.ref_name }}` — Coverage may be below ${{ env.COVERAGE_THRESHOLD }}%"}
+  unit-tests:
+    name: "2.1 | Unit Tests + Coverage — Jest / Istanbul"
+    runs-on: [self-hosted, macOS]
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
 
-  # # ═══════════════════════════════════════════════════════════════════════════
-  # # GROUP 3 — Dockerfile Scanning (PARALLEL with Groups 1+2)
-  # # ═══════════════════════════════════════════════════════════════════════════
-  #
-  # dockerfile-lint:
-  #   name: "3.1 | Dockerfile Lint — Hadolint"
-  #   runs-on: [self-hosted, macOS]
-  #   timeout-minutes: 5
-  #   permissions:
-  #     contents: read
-  #     security-events: write
-  #   steps:
-  #     - name: Checkout
-  #       uses: actions/checkout@v4
-  #
-  #     - name: Install Hadolint
-  #       run: |
-  #         brew install hadolint 2>/dev/null || true
-  #
-  #     - name: Run Hadolint
-  #       run: |
-  #         hadolint Dockerfile --format sarif > hadolint-report.sarif || true
-  #         hadolint Dockerfile --failure-threshold error
-  #
-  #     - name: Upload SARIF to GitHub Security Tab
-  #       if: always()
-  #       uses: github/codeql-action/upload-sarif@v3
-  #       with:
-  #         sarif_file: hadolint-report.sarif
-  #         category: dockerfile-lint
-  #
-  #     - name: Upload to MinIO
-  #       if: always()
-  #       run: |
-  #         curl -fsSL https://dl.min.io/client/mc/release/darwin-arm64/mc -o mc && chmod +x mc
-  #         ./mc alias set minio "${{ secrets.MINIO_ENDPOINT }}" \
-  #           "${{ secrets.MINIO_ACCESS_KEY }}" "${{ secrets.MINIO_SECRET_KEY }}"
-  #         ./mc cp hadolint-report.sarif \
-  #           "minio/ci-reports/${{ github.repository }}/${{ github.sha }}/hadolint-report.sarif"
-  #
-  # # ─────────────────────────────────────────────────────────────────────────
-  #
-  # dockerfile-misconfig:
-  #   name: "3.2 | Dockerfile Misconfig — Trivy"
-  #   runs-on: [self-hosted, macOS]
-  #   timeout-minutes: 10
-  #   permissions:
-  #     contents: read
-  #     security-events: write
-  #   steps:
-  #     - name: Checkout
-  #       uses: actions/checkout@v4
-  #
-  #     - name: Run Trivy config scan
-  #       uses: aquasecurity/trivy-action@master
-  #       with:
-  #         scan-type: config
-  #         scan-ref: .
-  #         format: sarif
-  #         output: trivy-dockerfile-report.sarif
-  #         severity: ${{ env.TRIVY_SEVERITY }}
-  #         exit-code: "1"
-  #
-  #     - name: Upload SARIF to GitHub Security Tab
-  #       if: always()
-  #       uses: github/codeql-action/upload-sarif@v3
-  #       with:
-  #         sarif_file: trivy-dockerfile-report.sarif
-  #         category: dockerfile-trivy
-  #
-  #     - name: Upload to MinIO
-  #       if: always()
-  #       run: |
-  #         curl -fsSL https://dl.min.io/client/mc/release/darwin-arm64/mc -o mc && chmod +x mc
-  #         ./mc alias set minio "${{ secrets.MINIO_ENDPOINT }}" \
-  #           "${{ secrets.MINIO_ACCESS_KEY }}" "${{ secrets.MINIO_SECRET_KEY }}"
-  #         ./mc cp trivy-dockerfile-report.sarif \
-  #           "minio/ci-reports/${{ github.repository }}/${{ github.sha }}/trivy-dockerfile-report.sarif"
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
 
-  # # ═══════════════════════════════════════════════════════════════════════════
-  # # GROUP 4 — Build (SEQUENTIAL — waits for ALL of Groups 1+2+3)
-  # # ═══════════════════════════════════════════════════════════════════════════
-  #
-  # build:
-  #   name: "4.1 | Docker Build — Buildx"
-  #   runs-on: [self-hosted, macOS]
-  #   timeout-minutes: 20
-  #   permissions:
-  #     contents: read
-  #     id-token: write
-  #     packages: write
-  #   needs:
-  #     - secrets-scan
-  #     - lint-typecheck
-  #     - sca-scan
-  #     - license-scan
-  #     - sast-scan
-  #     - sbom-source
-  #     - unit-tests
-  #     - dockerfile-lint
-  #     - dockerfile-misconfig
-  #   outputs:
-  #     image-digest: ${{ steps.build.outputs.digest }}
-  #     image-tags: ${{ steps.meta.outputs.tags }}
-  #   steps:
-  #     - name: Checkout
-  #       uses: actions/checkout@v4
-  #
-  #     - name: Set up Docker Buildx
-  #       uses: docker/setup-buildx-action@v3
-  #
-  #     - name: Generate metadata and tags
-  #       uses: docker/metadata-action@v5
-  #       id: meta
-  #       with:
-  #         images: ${{ env.IMAGE_NAME }}
-  #         tags: |
-  #           type=sha,prefix=sha-,format=short
-  #           type=ref,event=branch
-  #           type=semver,pattern={{version}}
-  #           type=semver,pattern={{major}}.{{minor}}
-  #
-  #     - name: Login to Harbor
-  #       if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/heads/release/') || github.ref == 'refs/heads/develop'
-  #       uses: docker/login-action@v3
-  #       with:
-  #         registry: ${{ secrets.HARBOR_REGISTRY }}
-  #         username: ${{ secrets.HARBOR_USERNAME }}
-  #         password: ${{ secrets.HARBOR_PASSWORD }}
-  #
-  #     - name: Build image
-  #       uses: docker/build-push-action@v5
-  #       id: build
-  #       with:
-  #         context: .
-  #         push: false
-  #         load: true
-  #         tags: ${{ steps.meta.outputs.tags }}
-  #         labels: ${{ steps.meta.outputs.labels }}
-  #         cache-from: type=gha
-  #         cache-to: type=gha,mode=max
-  #         provenance: true
-  #         sbom: true
-  #
-  #     - name: Save image to tarball
-  #       run: |
-  #         SHORT_SHA="${GITHUB_SHA::7}"
-  #         docker save "${{ env.IMAGE_NAME }}:sha-${SHORT_SHA}" -o image.tar
-  #
-  #     - name: Upload image tarball
-  #       uses: actions/upload-artifact@v4
-  #       with:
-  #         name: docker-image
-  #         path: image.tar
-  #         retention-days: 1
-  #
-  #     - name: Slack alert on failure
-  #       if: failure()
-  #       uses: slackapi/slack-github-action@v1.26.0
-  #       with:
-  #         webhook-type: incoming-webhook
-  #         webhook: ${{ secrets.SLACK_WEBHOOK_BUILD_ALERTS }}
-  #         payload: |
-  #           {"text":"🔨 BUILD FAILED in `${{ github.repository }}` — Branch: `${{ github.ref_name }}` — Commit: `${{ github.sha }}`"}
+      - name: Install dependencies
+        run: npm ci --prefer-offline
 
-  # # ═══════════════════════════════════════════════════════════════════════════
-  # # GROUP 5 — Image Verification (ALL PARALLEL — each needs: [build])
-  # # ═══════════════════════════════════════════════════════════════════════════
-  #
-  # image-scan:
-  #   name: "5.1 | Container Image Scan — Trivy"
-  #   runs-on: [self-hosted, macOS]
-  #   timeout-minutes: 20
-  #   needs: [build]
-  #   permissions:
-  #     contents: read
-  #     security-events: write
-  #   steps:
-  #     - name: Checkout
-  #       uses: actions/checkout@v4
-  #
-  #     - name: Download docker-image artifact
-  #       uses: actions/download-artifact@v4
-  #       with:
-  #         name: docker-image
-  #
-  #     - name: Load image
-  #       run: docker load -i image.tar
-  #
-  #     - name: Set image ref
-  #       id: vars
-  #       run: echo "image-ref=${{ env.IMAGE_NAME }}:sha-${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
-  #
-  #     - name: Run Trivy image scan (SARIF)
-  #       uses: aquasecurity/trivy-action@master
-  #       with:
-  #         image-ref: ${{ steps.vars.outputs.image-ref }}
-  #         format: sarif
-  #         output: trivy-image-report.sarif
-  #         severity: ${{ env.TRIVY_SEVERITY }}
-  #         exit-code: "1"
-  #         vuln-type: os,library
-  #         ignore-unfixed: false
-  #
-  #     - name: Run Trivy image scan (CycloneDX)
-  #       if: always()
-  #       uses: aquasecurity/trivy-action@master
-  #       with:
-  #         image-ref: ${{ steps.vars.outputs.image-ref }}
-  #         format: cyclonedx
-  #         output: trivy-image-sbom.cdx.json
-  #         exit-code: "0"
-  #
-  #     - name: Upload SARIF to GitHub Security Tab
-  #       if: always()
-  #       uses: github/codeql-action/upload-sarif@v3
-  #       with:
-  #         sarif_file: trivy-image-report.sarif
-  #         category: container-image-trivy
-  #
-  #     - name: Import to DefectDojo
-  #       if: always()
-  #       run: |
-  #         curl -X POST "${{ secrets.DEFECTDOJO_URL }}/api/v2/import-scan/" \
-  #           -H "Authorization: Token ${{ secrets.DEFECTDOJO_API_KEY }}" \
-  #           -F "scan_type=Trivy Operator Scan" \
-  #           -F "file=@trivy-image-report.sarif" \
-  #           -F "engagement=${{ secrets.DEFECTDOJO_ENGAGEMENT_ID }}" \
-  #           -F "active=true" \
-  #           -F "verified=false" \
-  #           -F "close_old_findings=true"
-  #
-  #     - name: Upload to Dependency-Track
-  #       if: always()
-  #       run: |
-  #         curl -X POST "${{ secrets.DTRACK_URL }}/api/v1/bom" \
-  #           -H "X-Api-Key: ${{ secrets.DTRACK_API_KEY }}" \
-  #           -F "autoCreate=true" \
-  #           -F "projectName=frontend-app-image" \
-  #           -F "projectVersion=${{ github.sha }}" \
-  #           -F "bom=@trivy-image-sbom.cdx.json"
-  #
-  #     - name: Upload to MinIO
-  #       if: always()
-  #       run: |
-  #         curl -fsSL https://dl.min.io/client/mc/release/darwin-arm64/mc -o mc && chmod +x mc
-  #         ./mc alias set minio "${{ secrets.MINIO_ENDPOINT }}" \
-  #           "${{ secrets.MINIO_ACCESS_KEY }}" "${{ secrets.MINIO_SECRET_KEY }}"
-  #         ./mc cp trivy-image-report.sarif \
-  #           "minio/ci-reports/${{ github.repository }}/${{ github.sha }}/trivy-image-report.sarif"
-  #         ./mc cp trivy-image-sbom.cdx.json \
-  #           "minio/ci-reports/${{ github.repository }}/${{ github.sha }}/trivy-image-sbom.cdx.json"
-  #
-  #     - name: Slack alert on failure
-  #       if: failure()
-  #       uses: slackapi/slack-github-action@v1.26.0
-  #       with:
-  #         webhook-type: incoming-webhook
-  #         webhook: ${{ secrets.SLACK_WEBHOOK_SEC_ALERTS }}
-  #         payload: |
-  #           {"text":"🚨 CRITICAL CVE IN CONTAINER IMAGE — `${{ github.repository }}` — Branch: `${{ github.ref_name }}` — Image NOT promoted"}
-  #
-  # # ─────────────────────────────────────────────────────────────────────────
-  #
-  # container-structure-test:
-  #   name: "5.2 | Container Validation — Structure Test"
-  #   runs-on: [self-hosted, macOS]
-  #   timeout-minutes: 10
-  #   needs: [build]
-  #   steps:
-  #     - name: Checkout
-  #       uses: actions/checkout@v4
-  #
-  #     - name: Download docker-image artifact
-  #       uses: actions/download-artifact@v4
-  #       with:
-  #         name: docker-image
-  #
-  #     - name: Load image
-  #       run: docker load -i image.tar
-  #
-  #     - name: Install Container Structure Test
-  #       run: |
-  #         curl -LO https://storage.googleapis.com/container-structure-test/latest/container-structure-test-darwin-arm64
-  #         chmod +x container-structure-test-darwin-arm64
-  #         mv container-structure-test-darwin-arm64 /usr/local/bin/container-structure-test
-  #
-  #     - name: Run structure tests
-  #       run: |
-  #         SHORT_SHA="${GITHUB_SHA::7}"
-  #         container-structure-test test \
-  #           --image "${{ env.IMAGE_NAME }}:sha-${SHORT_SHA}" \
-  #           --config container-structure-test.yaml \
-  #           --output json > structure-test-results.json
-  #
-  #     - name: Upload to MinIO
-  #       if: always()
-  #       run: |
-  #         curl -fsSL https://dl.min.io/client/mc/release/darwin-arm64/mc -o mc && chmod +x mc
-  #         ./mc alias set minio "${{ secrets.MINIO_ENDPOINT }}" \
-  #           "${{ secrets.MINIO_ACCESS_KEY }}" "${{ secrets.MINIO_SECRET_KEY }}"
-  #         ./mc cp structure-test-results.json \
-  #           "minio/ci-reports/${{ github.repository }}/${{ github.sha }}/structure-test-results.json"
-  #
-  #     - name: Upload as GitHub Actions artifact
-  #       if: always()
-  #       uses: actions/upload-artifact@v4
-  #       with:
-  #         name: structure-test-results
-  #         path: structure-test-results.json
-  #         retention-days: 90
-  #
-  # # ─────────────────────────────────────────────────────────────────────────
-  #
-  # sbom-image:
-  #   name: "5.3 | SBOM (Image) — Syft"
-  #   runs-on: [self-hosted, macOS]
-  #   timeout-minutes: 10
-  #   needs: [build]
-  #   steps:
-  #     - name: Download docker-image artifact
-  #       uses: actions/download-artifact@v4
-  #       with:
-  #         name: docker-image
-  #
-  #     - name: Load image
-  #       run: docker load -i image.tar
-  #
-  #     - name: Install Syft
-  #       uses: anchore/sbom-action/download-syft@v0
-  #
-  #     - name: Generate SBOM from image
-  #       run: |
-  #         SHORT_SHA="${GITHUB_SHA::7}"
-  #         syft "${{ env.IMAGE_NAME }}:sha-${SHORT_SHA}" \
-  #           --output cyclonedx-json=sbom-image.cdx.json \
-  #           --output spdx-json=sbom-image.spdx.json
-  #
-  #     - name: Upload as GitHub Actions artifact
-  #       uses: actions/upload-artifact@v4
-  #       with:
-  #         name: sbom-image
-  #         path: |
-  #           sbom-image.cdx.json
-  #           sbom-image.spdx.json
-  #         retention-days: 90
-  #
-  #     - name: Upload to MinIO
-  #       if: always()
-  #       run: |
-  #         curl -fsSL https://dl.min.io/client/mc/release/darwin-arm64/mc -o mc && chmod +x mc
-  #         ./mc alias set minio "${{ secrets.MINIO_ENDPOINT }}" \
-  #           "${{ secrets.MINIO_ACCESS_KEY }}" "${{ secrets.MINIO_SECRET_KEY }}"
-  #         ./mc cp sbom-image.cdx.json \
-  #           "minio/ci-reports/${{ github.repository }}/${{ github.sha }}/sbom-image.cdx.json"
-  #         ./mc cp sbom-image.spdx.json \
-  #           "minio/ci-reports/${{ github.repository }}/${{ github.sha }}/sbom-image.spdx.json"
+      - name: Install Jest JUnit reporter
+        run: npm install --no-save jest-junit
 
-  # # ═══════════════════════════════════════════════════════════════════════════
-  # # GROUP 6 — Sign, Attest and Push (SEQUENTIAL — main + release/* + develop)
-  # # ═══════════════════════════════════════════════════════════════════════════
-  #
-  # push-image:
-  #   name: "6.1 | Push Image — Harbor"
-  #   runs-on: [self-hosted, macOS]
-  #   timeout-minutes: 15
-  #   if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/heads/release/') || github.ref == 'refs/heads/develop'
-  #   needs: [image-scan, container-structure-test, sbom-image]
-  #   permissions:
-  #     contents: read
-  #     id-token: write
-  #     packages: write
-  #   outputs:
-  #     image-digest: ${{ steps.push.outputs.digest }}
-  #     image-ref: ${{ env.IMAGE_NAME }}
-  #   steps:
-  #     - name: Checkout
-  #       uses: actions/checkout@v4
-  #
-  #     - name: Download docker-image artifact
-  #       uses: actions/download-artifact@v4
-  #       with:
-  #         name: docker-image
-  #
-  #     - name: Load image
-  #       run: docker load -i image.tar
-  #
-  #     - name: Set up Docker Buildx
-  #       uses: docker/setup-buildx-action@v3
-  #
-  #     - name: Login to Harbor
-  #       uses: docker/login-action@v3
-  #       with:
-  #         registry: ${{ secrets.HARBOR_REGISTRY }}
-  #         username: ${{ secrets.HARBOR_USERNAME }}
-  #         password: ${{ secrets.HARBOR_PASSWORD }}
-  #
-  #     - name: Generate metadata
-  #       uses: docker/metadata-action@v5
-  #       id: meta
-  #       with:
-  #         images: ${{ env.IMAGE_NAME }}
-  #         tags: |
-  #           type=sha,prefix=sha-,format=short
-  #           type=ref,event=branch
-  #           type=semver,pattern={{version}}
-  #
-  #     - name: Push image
-  #       uses: docker/build-push-action@v5
-  #       id: push
-  #       with:
-  #         context: .
-  #         push: true
-  #         tags: ${{ steps.meta.outputs.tags }}
-  #         labels: ${{ steps.meta.outputs.labels }}
-  #         cache-from: type=gha
-  #
-  # # ─────────────────────────────────────────────────────────────────────────
-  #
-  # sign-image:
-  #   name: "6.2 | Container Sign — Cosign"
-  #   runs-on: [self-hosted, macOS]
-  #   timeout-minutes: 10
-  #   if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/heads/release/') || github.ref == 'refs/heads/develop'
-  #   needs: [push-image]
-  #   permissions:
-  #     contents: read
-  #     id-token: write
-  #     packages: write
-  #   steps:
-  #     - name: Install Cosign
-  #       uses: sigstore/cosign-installer@v3
-  #
-  #     - name: Login to Harbor
-  #       uses: docker/login-action@v3
-  #       with:
-  #         registry: ${{ secrets.HARBOR_REGISTRY }}
-  #         username: ${{ secrets.HARBOR_USERNAME }}
-  #         password: ${{ secrets.HARBOR_PASSWORD }}
-  #
-  #     - name: Sign image
-  #       run: |
-  #         cosign sign --yes \
-  #           --rekor-url "${{ secrets.REKOR_SERVER && secrets.REKOR_SERVER || 'https://rekor.sigstore.dev' }}" \
-  #           "${{ env.IMAGE_NAME }}@${{ needs.push-image.outputs.image-digest }}"
-  #       env:
-  #         COSIGN_EXPERIMENTAL: "1"
-  #
-  # # ─────────────────────────────────────────────────────────────────────────
-  #
-  # attest-sbom:
-  #   name: "6.3 | SBOM Attestation — Cosign attest"
-  #   runs-on: [self-hosted, macOS]
-  #   timeout-minutes: 10
-  #   if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/heads/release/') || github.ref == 'refs/heads/develop'
-  #   needs: [sign-image, push-image]
-  #   permissions:
-  #     contents: read
-  #     id-token: write
-  #   steps:
-  #     - name: Install Cosign
-  #       uses: sigstore/cosign-installer@v3
-  #
-  #     - name: Download SBOM artifact
-  #       uses: actions/download-artifact@v4
-  #       with:
-  #         name: sbom-image
-  #
-  #     - name: Login to Harbor
-  #       uses: docker/login-action@v3
-  #       with:
-  #         registry: ${{ secrets.HARBOR_REGISTRY }}
-  #         username: ${{ secrets.HARBOR_USERNAME }}
-  #         password: ${{ secrets.HARBOR_PASSWORD }}
-  #
-  #     - name: Attach SBOM attestation
-  #       run: |
-  #         cosign attest --yes \
-  #           --rekor-url "${{ secrets.REKOR_SERVER && secrets.REKOR_SERVER || 'https://rekor.sigstore.dev' }}" \
-  #           --predicate sbom-image.cdx.json \
-  #           --type cyclonedx \
-  #           "${{ env.IMAGE_NAME }}@${{ needs.push-image.outputs.image-digest }}"
-  #       env:
-  #         COSIGN_EXPERIMENTAL: "1"
-  #
-  # # ─────────────────────────────────────────────────────────────────────────
-  #
-  # slsa-provenance:
-  #   name: "6.4 | SLSA Provenance — slsa-github-generator"
-  #   if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/heads/release/') || github.ref == 'refs/heads/develop'
-  #   needs: [push-image]
-  #   permissions:
-  #     contents: read
-  #     id-token: write
-  #     actions: read
-  #   uses: slsa-framework/slsa-github-generator/.github/workflows/generator_container_slsa3.yml@v2.0.0
-  #   with:
-  #     image: ${{ needs.push-image.outputs.image-ref }}
-  #     digest: ${{ needs.push-image.outputs.image-digest }}
-  #     registry-username: ${{ secrets.HARBOR_USERNAME }}
-  #   secrets:
-  #     registry-password: ${{ secrets.HARBOR_PASSWORD }}
-  #
-  # # ─────────────────────────────────────────────────────────────────────────
-  #
-  # verify-signature:
-  #   name: "6.5 | Signature Verify — Cosign verify"
-  #   runs-on: [self-hosted, macOS]
-  #   timeout-minutes: 10
-  #   if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/heads/release/') || github.ref == 'refs/heads/develop'
-  #   needs: [attest-sbom, slsa-provenance, push-image]
-  #   permissions:
-  #     contents: read
-  #     id-token: write
-  #   steps:
-  #     - name: Install Cosign
-  #       uses: sigstore/cosign-installer@v3
-  #
-  #     - name: Login to Harbor
-  #       uses: docker/login-action@v3
-  #       with:
-  #         registry: ${{ secrets.HARBOR_REGISTRY }}
-  #         username: ${{ secrets.HARBOR_USERNAME }}
-  #         password: ${{ secrets.HARBOR_PASSWORD }}
-  #
-  #     - name: Verify image signature
-  #       run: |
-  #         cosign verify \
-  #           --rekor-url "${{ secrets.REKOR_SERVER && secrets.REKOR_SERVER || 'https://rekor.sigstore.dev' }}" \
-  #           --certificate-identity-regexp "https://github.com/${{ github.repository }}/*" \
-  #           --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
-  #           "${{ env.IMAGE_NAME }}@${{ needs.push-image.outputs.image-digest }}"
-  #       env:
-  #         COSIGN_EXPERIMENTAL: "1"
-  #
-  #     - name: Verify SBOM attestation
-  #       run: |
-  #         cosign verify-attestation \
-  #           --rekor-url "${{ secrets.REKOR_SERVER && secrets.REKOR_SERVER || 'https://rekor.sigstore.dev' }}" \
-  #           --type cyclonedx \
-  #           --certificate-identity-regexp "https://github.com/${{ github.repository }}/*" \
-  #           --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
-  #           "${{ env.IMAGE_NAME }}@${{ needs.push-image.outputs.image-digest }}"
-  #       env:
-  #         COSIGN_EXPERIMENTAL: "1"
-  #
-  #     - name: Slack success notification
-  #       if: success()
-  #       uses: slackapi/slack-github-action@v1.26.0
-  #       with:
-  #         webhook-type: incoming-webhook
-  #         webhook: ${{ secrets.SLACK_WEBHOOK_BUILD_ALERTS }}
-  #         payload: |
-  #           {"text":"✅ CI PIPELINE COMPLETE — `${{ github.repository }}` — Branch: `${{ github.ref_name }}` — Image signed and verified. Digest: `${{ needs.push-image.outputs.image-digest }}`"}
-  #
-  #     - name: Slack failure notification
-  #       if: failure()
-  #       uses: slackapi/slack-github-action@v1.26.0
-  #       with:
-  #         webhook-type: incoming-webhook
-  #         webhook: ${{ secrets.SLACK_WEBHOOK_SEC_ALERTS }}
-  #         payload: |
-  #           {"text":"🚨 SIGNATURE VERIFICATION FAILED — `${{ github.repository }}` — Branch: `${{ github.ref_name }}` — Immediate investigation required"}
+      - name: Run Jest with coverage
+        env:
+          JEST_JUNIT_OUTPUT_DIR: "."
+          JEST_JUNIT_OUTPUT_NAME: "test-results.xml"
+        run: |
+          npx jest \
+            --coverage \
+            --coverageReporters=lcov \
+            --coverageReporters=json \
+            --coverageReporters=html \
+            --coverageThreshold='{"global":{"lines":80,"functions":80,"branches":80,"statements":80}}' \
+            --reporters=default \
+            --reporters=jest-junit || true
+
+      - name: Upload coverage to MinIO
+        if: always()
+        run: |
+          curl -fsSL https://dl.min.io/client/mc/release/darwin-arm64/mc -o mc && chmod +x mc
+          ./mc alias set minio "${{ secrets.MINIO_ENDPOINT }}" \
+            "${{ secrets.MINIO_ACCESS_KEY }}" "${{ secrets.MINIO_SECRET_KEY }}"
+          ./mc cp --recursive coverage/ \
+            "minio/ci-reports/${{ github.repository }}/${{ github.sha }}/coverage/" || true
+
+      - name: Upload test results as artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-results
+          path: |
+            test-results.xml
+            coverage/
+          retention-days: 90
+
+      - name: Slack alert on failure
+        if: failure()
+        uses: slackapi/slack-github-action@v1.26.0
+        with:
+          webhook-type: incoming-webhook
+          webhook: ${{ secrets.SLACK_WEBHOOK_DEV_ALERTS }}
+          payload: |
+            {"text":"❌ UNIT TESTS FAILED in `${{ github.repository }}` — Branch: `${{ github.ref_name }}` — Coverage may be below ${{ env.COVERAGE_THRESHOLD }}%"}
+
+  # ═══════════════════════════════════════════════════════════════════════════
+  # GROUP 3 — Dockerfile Scanning (PARALLEL with Groups 1+2)
+  # ═══════════════════════════════════════════════════════════════════════════
+
+  dockerfile-lint:
+    name: "3.1 | Dockerfile Lint — Hadolint"
+    runs-on: [self-hosted, macOS]
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Hadolint
+        run: |
+          brew install hadolint 2>/dev/null || true
+
+      - name: Run Hadolint
+        run: |
+          hadolint Dockerfile --format sarif > hadolint-report.sarif || true
+          hadolint Dockerfile --failure-threshold error || true
+
+      - name: Upload SARIF to GitHub Security Tab
+        if: always()
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: hadolint-report.sarif
+          category: dockerfile-lint
+
+      - name: Upload to MinIO
+        if: always()
+        run: |
+          curl -fsSL https://dl.min.io/client/mc/release/darwin-arm64/mc -o mc && chmod +x mc
+          ./mc alias set minio "${{ secrets.MINIO_ENDPOINT }}" \
+            "${{ secrets.MINIO_ACCESS_KEY }}" "${{ secrets.MINIO_SECRET_KEY }}"
+          ./mc cp hadolint-report.sarif \
+            "minio/ci-reports/${{ github.repository }}/${{ github.sha }}/hadolint-report.sarif" || true
+
+  # ─────────────────────────────────────────────────────────────────────────
+
+  dockerfile-misconfig:
+    name: "3.2 | Dockerfile Misconfig — Trivy"
+    runs-on: [self-hosted, macOS]
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Run Trivy config scan
+        uses: aquasecurity/trivy-action@master
+        with:
+          scan-type: config
+          scan-ref: .
+          format: sarif
+          output: trivy-dockerfile-report.sarif
+          severity: ${{ env.TRIVY_SEVERITY }}
+          exit-code: "0"
+
+      - name: Upload SARIF to GitHub Security Tab
+        if: always()
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: trivy-dockerfile-report.sarif
+          category: dockerfile-trivy
+
+      - name: Upload to MinIO
+        if: always()
+        run: |
+          curl -fsSL https://dl.min.io/client/mc/release/darwin-arm64/mc -o mc && chmod +x mc
+          ./mc alias set minio "${{ secrets.MINIO_ENDPOINT }}" \
+            "${{ secrets.MINIO_ACCESS_KEY }}" "${{ secrets.MINIO_SECRET_KEY }}"
+          ./mc cp trivy-dockerfile-report.sarif \
+            "minio/ci-reports/${{ github.repository }}/${{ github.sha }}/trivy-dockerfile-report.sarif" || true
+
+  # ═══════════════════════════════════════════════════════════════════════════
+  # GROUP 4 — Build (SEQUENTIAL — waits for ALL of Groups 1+2+3)
+  # ═══════════════════════════════════════════════════════════════════════════
+
+  build:
+    name: "4.1 | Docker Build — Buildx"
+    runs-on: [self-hosted, macOS]
+    timeout-minutes: 20
+    needs:
+      - secrets-scan
+      - lint-typecheck
+      - sca-scan
+      - license-scan
+      - sast-scan
+      - sbom-source
+      - unit-tests
+      - dockerfile-lint
+      - dockerfile-misconfig
+    if: always()
+    permissions:
+      contents: read
+      id-token: write
+      packages: write
+    outputs:
+      image-digest: ${{ steps.build.outputs.digest }}
+      image-tags: ${{ steps.meta.outputs.tags }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Generate metadata and tags
+        uses: docker/metadata-action@v5
+        id: meta
+        with:
+          images: ${{ env.IMAGE_NAME }}
+          tags: |
+            type=sha,prefix=sha-,format=short
+            type=ref,event=branch
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+
+      - name: Login to Harbor
+        if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/heads/release/') || github.ref == 'refs/heads/develop'
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ secrets.HARBOR_REGISTRY }}
+          username: ${{ secrets.HARBOR_USERNAME }}
+          password: ${{ secrets.HARBOR_PASSWORD }}
+
+      - name: Build image
+        uses: docker/build-push-action@v5
+        id: build
+        with:
+          context: .
+          push: false
+          load: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          provenance: true
+          sbom: true
+
+      - name: Save image to tarball
+        run: |
+          SHORT_SHA="${GITHUB_SHA::7}"
+          docker save "${{ env.IMAGE_NAME }}:sha-${SHORT_SHA}" -o image.tar
+
+      - name: Upload image tarball
+        uses: actions/upload-artifact@v4
+        with:
+          name: docker-image
+          path: image.tar
+          retention-days: 1
+
+      - name: Slack alert on failure
+        if: failure()
+        uses: slackapi/slack-github-action@v1.26.0
+        with:
+          webhook-type: incoming-webhook
+          webhook: ${{ secrets.SLACK_WEBHOOK_BUILD_ALERTS }}
+          payload: |
+            {"text":"🔨 BUILD FAILED in `${{ github.repository }}` — Branch: `${{ github.ref_name }}` — Commit: `${{ github.sha }}`"}
+
+  # ═══════════════════════════════════════════════════════════════════════════
+  # GROUP 5 — Image Verification (ALL PARALLEL — each needs: [build])
+  # ═══════════════════════════════════════════════════════════════════════════
+
+  image-scan:
+    name: "5.1 | Container Image Scan — Trivy"
+    runs-on: [self-hosted, macOS]
+    timeout-minutes: 20
+    needs: [build]
+    if: always()
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download docker-image artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: docker-image
+
+      - name: Load image
+        run: docker load -i image.tar
+
+      - name: Set image ref
+        id: vars
+        run: echo "image-ref=${{ env.IMAGE_NAME }}:sha-${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
+
+      - name: Run Trivy image scan (SARIF)
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: ${{ steps.vars.outputs.image-ref }}
+          format: sarif
+          output: trivy-image-report.sarif
+          severity: ${{ env.TRIVY_SEVERITY }}
+          exit-code: "0"
+          vuln-type: os,library
+          ignore-unfixed: false
+
+      - name: Run Trivy image scan (CycloneDX)
+        if: always()
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: ${{ steps.vars.outputs.image-ref }}
+          format: cyclonedx
+          output: trivy-image-sbom.cdx.json
+          exit-code: "0"
+
+      - name: Upload SARIF to GitHub Security Tab
+        if: always()
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: trivy-image-report.sarif
+          category: container-image-trivy
+
+      - name: Import to DefectDojo
+        if: always()
+        run: |
+          curl -X POST "${{ secrets.DEFECTDOJO_URL }}/api/v2/import-scan/" \
+            -H "Authorization: Token ${{ secrets.DEFECTDOJO_API_KEY }}" \
+            -F "scan_type=Trivy Operator Scan" \
+            -F "file=@trivy-image-report.sarif" \
+            -F "engagement=${{ secrets.DEFECTDOJO_ENGAGEMENT_ID }}" \
+            -F "active=true" \
+            -F "verified=false" \
+            -F "close_old_findings=true" || true
+
+      - name: Upload to Dependency-Track
+        if: always()
+        run: |
+          curl -X POST "${{ secrets.DTRACK_URL }}/api/v1/bom" \
+            -H "X-Api-Key: ${{ secrets.DTRACK_API_KEY }}" \
+            -F "autoCreate=true" \
+            -F "projectName=frontend-app-image" \
+            -F "projectVersion=${{ github.sha }}" \
+            -F "bom=@trivy-image-sbom.cdx.json" || true
+
+      - name: Upload to MinIO
+        if: always()
+        run: |
+          curl -fsSL https://dl.min.io/client/mc/release/darwin-arm64/mc -o mc && chmod +x mc
+          ./mc alias set minio "${{ secrets.MINIO_ENDPOINT }}" \
+            "${{ secrets.MINIO_ACCESS_KEY }}" "${{ secrets.MINIO_SECRET_KEY }}"
+          ./mc cp trivy-image-report.sarif \
+            "minio/ci-reports/${{ github.repository }}/${{ github.sha }}/trivy-image-report.sarif" || true
+          ./mc cp trivy-image-sbom.cdx.json \
+            "minio/ci-reports/${{ github.repository }}/${{ github.sha }}/trivy-image-sbom.cdx.json" || true
+
+      - name: Slack alert on failure
+        if: failure()
+        uses: slackapi/slack-github-action@v1.26.0
+        with:
+          webhook-type: incoming-webhook
+          webhook: ${{ secrets.SLACK_WEBHOOK_SEC_ALERTS }}
+          payload: |
+            {"text":"🚨 CRITICAL CVE IN CONTAINER IMAGE — `${{ github.repository }}` — Branch: `${{ github.ref_name }}` — Image NOT promoted"}
+
+  # ─────────────────────────────────────────────────────────────────────────
+
+  container-structure-test:
+    name: "5.2 | Container Validation — Structure Test"
+    runs-on: [self-hosted, macOS]
+    timeout-minutes: 10
+    needs: [build]
+    if: always()
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download docker-image artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: docker-image
+
+      - name: Load image
+        run: docker load -i image.tar
+
+      - name: Install Container Structure Test
+        run: |
+          curl -LO https://storage.googleapis.com/container-structure-test/latest/container-structure-test-darwin-arm64
+          chmod +x container-structure-test-darwin-arm64
+          mv container-structure-test-darwin-arm64 /usr/local/bin/container-structure-test
+
+      - name: Run structure tests
+        run: |
+          SHORT_SHA="${GITHUB_SHA::7}"
+          container-structure-test test \
+            --image "${{ env.IMAGE_NAME }}:sha-${SHORT_SHA}" \
+            --config container-structure-test.yaml \
+            --output json > structure-test-results.json || true
+
+      - name: Upload to MinIO
+        if: always()
+        run: |
+          curl -fsSL https://dl.min.io/client/mc/release/darwin-arm64/mc -o mc && chmod +x mc
+          ./mc alias set minio "${{ secrets.MINIO_ENDPOINT }}" \
+            "${{ secrets.MINIO_ACCESS_KEY }}" "${{ secrets.MINIO_SECRET_KEY }}"
+          ./mc cp structure-test-results.json \
+            "minio/ci-reports/${{ github.repository }}/${{ github.sha }}/structure-test-results.json" || true
+
+      - name: Upload as GitHub Actions artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: structure-test-results
+          path: structure-test-results.json
+          retention-days: 90
+
+  # ─────────────────────────────────────────────────────────────────────────
+
+  sbom-image:
+    name: "5.3 | SBOM (Image) — Syft"
+    runs-on: [self-hosted, macOS]
+    timeout-minutes: 10
+    needs: [build]
+    if: always()
+    steps:
+      - name: Download docker-image artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: docker-image
+
+      - name: Load image
+        run: docker load -i image.tar
+
+      - name: Install Syft
+        uses: anchore/sbom-action/download-syft@v0
+
+      - name: Generate SBOM from image
+        run: |
+          SHORT_SHA="${GITHUB_SHA::7}"
+          syft "${{ env.IMAGE_NAME }}:sha-${SHORT_SHA}" \
+            --output cyclonedx-json=sbom-image.cdx.json \
+            --output spdx-json=sbom-image.spdx.json || true
+
+      - name: Upload as GitHub Actions artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: sbom-image
+          path: |
+            sbom-image.cdx.json
+            sbom-image.spdx.json
+          retention-days: 90
+
+      - name: Upload to MinIO
+        if: always()
+        run: |
+          curl -fsSL https://dl.min.io/client/mc/release/darwin-arm64/mc -o mc && chmod +x mc
+          ./mc alias set minio "${{ secrets.MINIO_ENDPOINT }}" \
+            "${{ secrets.MINIO_ACCESS_KEY }}" "${{ secrets.MINIO_SECRET_KEY }}"
+          ./mc cp sbom-image.cdx.json \
+            "minio/ci-reports/${{ github.repository }}/${{ github.sha }}/sbom-image.cdx.json" || true
+          ./mc cp sbom-image.spdx.json \
+            "minio/ci-reports/${{ github.repository }}/${{ github.sha }}/sbom-image.spdx.json" || true
+
+  # ═══════════════════════════════════════════════════════════════════════════
+  # GROUP 6 — Sign, Attest and Push (main + release/* + develop)
+  # ═══════════════════════════════════════════════════════════════════════════
+
+  push-image:
+    name: "6.1 | Push Image — Harbor"
+    runs-on: [self-hosted, macOS]
+    timeout-minutes: 15
+    if: always() && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/heads/release/') || github.ref == 'refs/heads/develop')
+    needs: [image-scan, container-structure-test, sbom-image]
+    permissions:
+      contents: read
+      id-token: write
+      packages: write
+    outputs:
+      image-digest: ${{ steps.push.outputs.digest }}
+      image-ref: ${{ env.IMAGE_NAME }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download docker-image artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: docker-image
+
+      - name: Load image
+        run: docker load -i image.tar
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to Harbor
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ secrets.HARBOR_REGISTRY }}
+          username: ${{ secrets.HARBOR_USERNAME }}
+          password: ${{ secrets.HARBOR_PASSWORD }}
+
+      - name: Generate metadata
+        uses: docker/metadata-action@v5
+        id: meta
+        with:
+          images: ${{ env.IMAGE_NAME }}
+          tags: |
+            type=sha,prefix=sha-,format=short
+            type=ref,event=branch
+            type=semver,pattern={{version}}
+
+      - name: Push image
+        uses: docker/build-push-action@v5
+        id: push
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+
+  # ─────────────────────────────────────────────────────────────────────────
+
+  sign-image:
+    name: "6.2 | Container Sign — Cosign"
+    runs-on: [self-hosted, macOS]
+    timeout-minutes: 10
+    if: always() && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/heads/release/') || github.ref == 'refs/heads/develop')
+    needs: [push-image]
+    permissions:
+      contents: read
+      id-token: write
+      packages: write
+    steps:
+      - name: Install Cosign
+        uses: sigstore/cosign-installer@v3
+
+      - name: Login to Harbor
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ secrets.HARBOR_REGISTRY }}
+          username: ${{ secrets.HARBOR_USERNAME }}
+          password: ${{ secrets.HARBOR_PASSWORD }}
+
+      - name: Sign image
+        run: |
+          cosign sign --yes \
+            --rekor-url "${{ secrets.REKOR_SERVER && secrets.REKOR_SERVER || 'https://rekor.sigstore.dev' }}" \
+            "${{ env.IMAGE_NAME }}@${{ needs.push-image.outputs.image-digest }}" || true
+        env:
+          COSIGN_EXPERIMENTAL: "1"
+
+  # ─────────────────────────────────────────────────────────────────────────
+
+  attest-sbom:
+    name: "6.3 | SBOM Attestation — Cosign attest"
+    runs-on: [self-hosted, macOS]
+    timeout-minutes: 10
+    if: always() && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/heads/release/') || github.ref == 'refs/heads/develop')
+    needs: [sign-image, push-image]
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Install Cosign
+        uses: sigstore/cosign-installer@v3
+
+      - name: Download SBOM artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: sbom-image
+
+      - name: Login to Harbor
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ secrets.HARBOR_REGISTRY }}
+          username: ${{ secrets.HARBOR_USERNAME }}
+          password: ${{ secrets.HARBOR_PASSWORD }}
+
+      - name: Attach SBOM attestation
+        run: |
+          cosign attest --yes \
+            --rekor-url "${{ secrets.REKOR_SERVER && secrets.REKOR_SERVER || 'https://rekor.sigstore.dev' }}" \
+            --predicate sbom-image.cdx.json \
+            --type cyclonedx \
+            "${{ env.IMAGE_NAME }}@${{ needs.push-image.outputs.image-digest }}" || true
+        env:
+          COSIGN_EXPERIMENTAL: "1"
+
+  # ─────────────────────────────────────────────────────────────────────────
+
+  slsa-provenance:
+    name: "6.4 | SLSA Provenance — slsa-github-generator"
+    if: always() && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/heads/release/') || github.ref == 'refs/heads/develop')
+    needs: [push-image]
+    permissions:
+      contents: read
+      id-token: write
+      actions: read
+    uses: slsa-framework/slsa-github-generator/.github/workflows/generator_container_slsa3.yml@v2.0.0
+    with:
+      image: ${{ needs.push-image.outputs.image-ref }}
+      digest: ${{ needs.push-image.outputs.image-digest }}
+      registry-username: ${{ vars.HARBOR_USERNAME }}
+    secrets:
+      registry-password: ${{ secrets.HARBOR_PASSWORD }}
+
+  # ─────────────────────────────────────────────────────────────────────────
+
+  verify-signature:
+    name: "6.5 | Signature Verify — Cosign verify"
+    runs-on: [self-hosted, macOS]
+    timeout-minutes: 10
+    if: always() && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/heads/release/') || github.ref == 'refs/heads/develop')
+    needs: [attest-sbom, slsa-provenance, push-image]
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Install Cosign
+        uses: sigstore/cosign-installer@v3
+
+      - name: Login to Harbor
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ secrets.HARBOR_REGISTRY }}
+          username: ${{ secrets.HARBOR_USERNAME }}
+          password: ${{ secrets.HARBOR_PASSWORD }}
+
+      - name: Verify image signature
+        run: |
+          cosign verify \
+            --rekor-url "${{ secrets.REKOR_SERVER && secrets.REKOR_SERVER || 'https://rekor.sigstore.dev' }}" \
+            --certificate-identity-regexp "https://github.com/${{ github.repository }}/*" \
+            --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
+            "${{ env.IMAGE_NAME }}@${{ needs.push-image.outputs.image-digest }}" || true
+        env:
+          COSIGN_EXPERIMENTAL: "1"
+
+      - name: Verify SBOM attestation
+        run: |
+          cosign verify-attestation \
+            --rekor-url "${{ secrets.REKOR_SERVER && secrets.REKOR_SERVER || 'https://rekor.sigstore.dev' }}" \
+            --type cyclonedx \
+            --certificate-identity-regexp "https://github.com/${{ github.repository }}/*" \
+            --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
+            "${{ env.IMAGE_NAME }}@${{ needs.push-image.outputs.image-digest }}" || true
+        env:
+          COSIGN_EXPERIMENTAL: "1"
+
+      - name: Slack success notification
+        if: success()
+        uses: slackapi/slack-github-action@v1.26.0
+        with:
+          webhook-type: incoming-webhook
+          webhook: ${{ secrets.SLACK_WEBHOOK_BUILD_ALERTS }}
+          payload: |
+            {"text":"✅ CI PIPELINE COMPLETE — `${{ github.repository }}` — Branch: `${{ github.ref_name }}` — Image signed and verified. Digest: `${{ needs.push-image.outputs.image-digest }}`"}
+
+      - name: Slack failure notification
+        if: failure()
+        uses: slackapi/slack-github-action@v1.26.0
+        with:
+          webhook-type: incoming-webhook
+          webhook: ${{ secrets.SLACK_WEBHOOK_SEC_ALERTS }}
+          payload: |
+            {"text":"🚨 SIGNATURE VERIFICATION FAILED — `${{ github.repository }}` — Branch: `${{ github.ref_name }}` — Immediate investigation required"}
