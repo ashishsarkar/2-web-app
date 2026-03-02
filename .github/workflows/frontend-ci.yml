@@ -429,7 +429,7 @@ jobs:
           retention-days: 90
 
   # ═══════════════════════════════════════════════════════════════════════════
-  # GROUP 2 — Unit Tests (PARALLEL with Group 1)
+  # GROUP 2 — Unit Tests + Integration Tests (Unit parallel with Group 1; Integration after Unit)
   # ═══════════════════════════════════════════════════════════════════════════
 
   unit-tests:
@@ -493,6 +493,68 @@ jobs:
           webhook: ${{ secrets.SLACK_WEBHOOK_DEV_ALERTS }}
           payload: |
             {"text":"❌ UNIT TESTS FAILED in `${{ github.repository }}` — Branch: `${{ github.ref_name }}` — Coverage may be below ${{ env.COVERAGE_THRESHOLD }}%"}
+
+  # ─────────────────────────────────────────────────────────────────────────
+
+  integration-tests:
+    name: "2.2 | Integration Tests — Jest (__tests__/integration)"
+    runs-on: [self-hosted, macOS]
+    timeout-minutes: 15
+    needs: [unit-tests]
+    if: always()
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci --prefer-offline
+
+      - name: Install Jest JUnit reporter
+        run: npm install --no-save jest-junit
+
+      - name: Run integration tests
+        env:
+          JEST_JUNIT_OUTPUT_DIR: "."
+          JEST_JUNIT_OUTPUT_NAME: "integration-test-results.xml"
+        run: |
+          npx jest __tests__/integration \
+            --reporters=default \
+            --reporters=jest-junit || true
+
+      - name: Upload integration results to MinIO
+        if: always()
+        run: |
+          curl -fsSL https://dl.min.io/client/mc/release/darwin-arm64/mc -o mc && chmod +x mc
+          ./mc alias set minio "${{ secrets.MINIO_ENDPOINT }}" \
+            "${{ secrets.MINIO_ACCESS_KEY }}" "${{ secrets.MINIO_SECRET_KEY }}"
+          if [ -f integration-test-results.xml ]; then
+            ./mc cp integration-test-results.xml \
+              "minio/ci-reports/${{ github.repository }}/${{ github.sha }}/integration-test-results.xml"
+          fi || true
+
+      - name: Upload integration test results as artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: integration-test-results
+          path: integration-test-results.xml
+          retention-days: 90
+          if-no-files-found: ignore
+
+      - name: Slack alert on failure
+        if: failure()
+        uses: slackapi/slack-github-action@v1.26.0
+        with:
+          webhook-type: incoming-webhook
+          webhook: ${{ secrets.SLACK_WEBHOOK_DEV_ALERTS }}
+          payload: |
+            {"text":"❌ INTEGRATION TESTS FAILED in `${{ github.repository }}` — Branch: `${{ github.ref_name }}`"}
 
   # ═══════════════════════════════════════════════════════════════════════════
   # GROUP 3 — Dockerfile Scanning (PARALLEL with Groups 1+2)
@@ -589,6 +651,7 @@ jobs:
       - sast-scan
       - sbom-source
       - unit-tests
+      - integration-tests
       - dockerfile-lint
       - dockerfile-misconfig
     if: always()
