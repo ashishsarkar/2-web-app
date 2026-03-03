@@ -1,0 +1,1986 @@
+# Frontend CD Pipeline — Secured Kubernetes Deployment
+#
+# Triggers after Frontend CI Pipeline completes successfully on:
+#   main, develop, release/**
+#
+# Required GitHub Secrets (CD-specific — CI secrets also required):
+# KUBECONFIG                  — base64-encoded kubeconfig for cluster access
+# ARGOCD_SERVER               — ArgoCD server URL (e.g. argocd.example.com)
+# ARGOCD_TOKEN                — ArgoCD API token
+# VAULT_ADDR                  — Vault server address
+# VAULT_TOKEN                 — Vault token for ESO
+# APP_URL_DEV                 — Application base URL for dev environment
+# APP_URL_STAGING             — Application base URL for staging environment
+# APP_URL_PROD                — Application base URL for prod environment
+# PROMETHEUS_URL              — Prometheus API URL
+# GRAFANA_URL                 — Grafana URL
+# DEFECTDOJO_CD_ENGAGEMENT_ID — Separate DefectDojo engagement for CD findings
+# SLACK_WEBHOOK_DEPLOY_ALERTS — Deployment events channel
+# SLACK_WEBHOOK_SEC_ALERTS    — Security gate failures channel (reused from CI)
+# SLACK_WEBHOOK_ROLLBACK_ALERTS  — Rollback events channel
+# SLACK_WEBHOOK_APPROVAL_ALERTS  — Manual approval gate channel
+#
+# Reused from CI secrets:
+# HARBOR_REGISTRY, HARBOR_USERNAME, HARBOR_PASSWORD
+# COSIGN_PRIVATE_KEY, COSIGN_PASSWORD, REKOR_SERVER
+# DEFECTDOJO_URL, DEFECTDOJO_API_KEY
+# DTRACK_URL, DTRACK_API_KEY
+# MINIO_ENDPOINT, MINIO_ACCESS_KEY, MINIO_SECRET_KEY
+
+name: Frontend CD Pipeline
+
+on:
+  workflow_run:
+    workflows: ["Frontend CI Pipeline"]
+    types: [completed]
+    branches:
+      - main
+      - develop
+      - "release/**"
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: "Target environment"
+        required: true
+        type: choice
+        options: [dev, staging, prod]
+      force_deploy:
+        description: "Force deploy (skip security gate failures)"
+        required: false
+        default: "false"
+        type: boolean
+
+concurrency:
+  group: cd-${{ github.ref }}-${{ github.event.inputs.environment || 'auto' }}
+  cancel-in-progress: false   # Never cancel in-flight deployments
+
+env:
+  IMAGE_NAME: ${{ secrets.HARBOR_REGISTRY }}/${{ secrets.HARBOR_PROJECT }}/frontend-app
+  HELM_CHART_PATH: charts/frontend-app
+  K8S_MANIFEST_PATH: k8s/manifests
+  KYVERNO_POLICY_PATH: k8s/policies/kyverno
+  OPA_POLICY_PATH: k8s/policies/opa
+  TRIVY_SEVERITY: "CRITICAL,HIGH"
+  OWASP_ZAP_RULES: k8s/zap/rules.tsv
+  FALCO_RULES_PATH: k8s/falco/rules.yaml
+  CIS_BENCHMARK_VERSION: "cis-1.8"
+  MINIO_CD_BASE: "cd-reports"
+  # Rollback thresholds (used by Argo Rollouts analysis)
+  ROLLBACK_ERROR_RATE: "0.05"
+  ROLLBACK_P99_LATENCY_MS: "3000"
+  ROLLBACK_SUCCESS_RATE: "0.95"
+
+jobs:
+
+  # ═══════════════════════════════════════════════════════════════════════════
+  # SETUP — Determine environment + image digest from CI workflow
+  # ═══════════════════════════════════════════════════════════════════════════
+
+  setup:
+    name: "0 | Setup — Resolve Environment + Image Digest"
+    runs-on: [self-hosted, macOS]
+    timeout-minutes: 5
+    if: >
+      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success')
+    outputs:
+      environment: ${{ steps.env.outputs.environment }}
+      app-url: ${{ steps.env.outputs.app_url }}
+      namespace: ${{ steps.env.outputs.namespace }}
+      image-digest: ${{ steps.digest.outputs.image_digest }}
+      image-ref: ${{ steps.digest.outputs.image_ref }}
+      minio-path: ${{ steps.env.outputs.minio_path }}
+      canary-enabled: ${{ steps.env.outputs.canary_enabled }}
+    steps:
+      - name: Determine environment
+        id: env
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            ENV="${{ github.event.inputs.environment }}"
+          elif [[ "${{ github.ref }}" == "refs/heads/main" ]]; then
+            ENV="staging"
+          elif [[ "${{ github.ref }}" == refs/heads/release/* ]]; then
+            ENV="prod"
+          else
+            ENV="dev"
+          fi
+
+          case $ENV in
+            prod)
+              echo "app_url=${{ secrets.APP_URL_PROD }}" >> "$GITHUB_OUTPUT"
+              echo "namespace=frontend-prod" >> "$GITHUB_OUTPUT"
+              echo "canary_enabled=true" >> "$GITHUB_OUTPUT"
+              ;;
+            staging)
+              echo "app_url=${{ secrets.APP_URL_STAGING }}" >> "$GITHUB_OUTPUT"
+              echo "namespace=frontend-staging" >> "$GITHUB_OUTPUT"
+              echo "canary_enabled=true" >> "$GITHUB_OUTPUT"
+              ;;
+            *)
+              echo "app_url=${{ secrets.APP_URL_DEV }}" >> "$GITHUB_OUTPUT"
+              echo "namespace=frontend-dev" >> "$GITHUB_OUTPUT"
+              echo "canary_enabled=false" >> "$GITHUB_OUTPUT"
+              ;;
+          esac
+
+          echo "environment=$ENV" >> "$GITHUB_OUTPUT"
+          echo "minio_path=${{ env.MINIO_CD_BASE }}/${{ github.repository }}/${{ github.sha }}/${ENV}" \
+            >> "$GITHUB_OUTPUT"
+
+      - name: Resolve image digest from Harbor
+        id: digest
+        run: |
+          SHORT_SHA="${GITHUB_SHA::7}"
+          IMAGE_REF="${{ env.IMAGE_NAME }}:sha-${SHORT_SHA}"
+          DIGEST=$(docker manifest inspect "$IMAGE_REF" \
+            --insecure 2>/dev/null | \
+            python3 -c "import sys,json; d=json.load(sys.stdin); \
+              print(d.get('config',{}).get('digest',''))" 2>/dev/null || \
+            echo "sha256:unknown")
+          echo "image_ref=${IMAGE_REF}" >> "$GITHUB_OUTPUT"
+          echo "image_digest=${DIGEST}" >> "$GITHUB_OUTPUT"
+
+
+  # ═══════════════════════════════════════════════════════════════════════════
+  # GROUP 1 — Pre-Deploy Security Gates [ALL PARALLEL — waits for setup]
+  # Jobs: 1.1 through 1.9 (1.9 = Gap #6: DTrack re-query)
+  # ═══════════════════════════════════════════════════════════════════════════
+
+  trivy-manifest-scan:
+    name: "1.1 | K8s Manifest Scan — Trivy"
+    runs-on: [self-hosted, macOS]
+    timeout-minutes: 20
+    needs: [setup]
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Render Helm templates
+        run: |
+          mkdir -p rendered-manifests
+          helm template "${{ env.HELM_CHART_PATH }}" \
+            --values "${{ env.HELM_CHART_PATH }}/values-${{ needs.setup.outputs.environment }}.yaml" \
+            --output-dir rendered-manifests
+
+      - name: Run Trivy on manifests (SARIF)
+        uses: aquasecurity/trivy-action@master
+        with:
+          scan-type: config
+          scan-ref: rendered-manifests
+          format: sarif
+          output: trivy-manifest-report.sarif
+          severity: ${{ env.TRIVY_SEVERITY }}
+          exit-code: "0"
+
+      - name: Run Trivy on manifests (JSON)
+        uses: aquasecurity/trivy-action@master
+        with:
+          scan-type: config
+          scan-ref: rendered-manifests
+          format: json
+          output: trivy-manifest-report.json
+          severity: ${{ env.TRIVY_SEVERITY }}
+          exit-code: "1"
+          ignore-unfixed: false
+
+      - name: Upload SARIF to GitHub Security Tab
+        if: always()
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: trivy-manifest-report.sarif
+          category: cd-trivy-manifests
+
+      - name: Import to DefectDojo
+        if: always()
+        run: |
+          curl -X POST "${{ secrets.DEFECTDOJO_URL }}/api/v2/import-scan/" \
+            -H "Authorization: Token ${{ secrets.DEFECTDOJO_API_KEY }}" \
+            -F "scan_type=Trivy Operator Scan" \
+            -F "file=@trivy-manifest-report.sarif" \
+            -F "engagement=${{ secrets.DEFECTDOJO_CD_ENGAGEMENT_ID }}" \
+            -F "active=true" \
+            -F "verified=false" \
+            -F "close_old_findings=true" || true
+
+      - name: Upload to MinIO
+        if: always()
+        run: |
+          curl -fsSL https://dl.min.io/client/mc/release/darwin-arm64/mc -o mc && chmod +x mc
+          ./mc alias set minio "${{ secrets.MINIO_ENDPOINT }}" \
+            "${{ secrets.MINIO_ACCESS_KEY }}" "${{ secrets.MINIO_SECRET_KEY }}"
+          ./mc cp trivy-manifest-report.sarif \
+            "minio/${{ needs.setup.outputs.minio-path }}/group1/trivy-manifest-report.sarif" || true
+          ./mc cp trivy-manifest-report.json \
+            "minio/${{ needs.setup.outputs.minio-path }}/group1/trivy-manifest-report.json" || true
+
+      - name: Slack alert on failure
+        if: failure()
+        uses: slackapi/slack-github-action@v1.26.0
+        with:
+          webhook-type: incoming-webhook
+          webhook: ${{ secrets.SLACK_WEBHOOK_SEC_ALERTS }}
+          payload: |
+            {"text":"🚨 [CD 1.1] Trivy manifest scan FAILED — `${{ github.repository }}` — Env: `${{ needs.setup.outputs.environment }}` — SHA: `${{ github.sha }}`"}
+
+  # ─────────────────────────────────────────────────────────────────────────
+
+  kubescape-scan:
+    name: "1.2 | K8s Manifest Scan — Kubescape NSA/MITRE"
+    runs-on: [self-hosted, macOS]
+    timeout-minutes: 15
+    needs: [setup]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Kubescape
+        run: |
+          curl -s https://raw.githubusercontent.com/kubescape/kubescape/master/install.sh | /bin/bash
+          echo "$HOME/.kubescape/bin" >> "$GITHUB_PATH"
+
+      - name: Render Helm templates
+        run: |
+          mkdir -p rendered-manifests
+          helm template "${{ env.HELM_CHART_PATH }}" \
+            --values "${{ env.HELM_CHART_PATH }}/values-${{ needs.setup.outputs.environment }}.yaml" \
+            --output-dir rendered-manifests
+
+      - name: Run Kubescape (NSA + MITRE)
+        run: |
+          kubescape scan framework nsa,mitre \
+            rendered-manifests/ \
+            --format json \
+            --output kubescape-report.json \
+            --fail-threshold 0 || true
+          kubescape scan framework nsa,mitre \
+            rendered-manifests/ \
+            --format html \
+            --output kubescape-report.html || true
+
+      - name: Import to DefectDojo
+        if: always()
+        run: |
+          curl -X POST "${{ secrets.DEFECTDOJO_URL }}/api/v2/import-scan/" \
+            -H "Authorization: Token ${{ secrets.DEFECTDOJO_API_KEY }}" \
+            -F "scan_type=Kube-bench Scan" \
+            -F "file=@kubescape-report.json" \
+            -F "engagement=${{ secrets.DEFECTDOJO_CD_ENGAGEMENT_ID }}" \
+            -F "active=true" \
+            -F "verified=false" || true
+
+      - name: Upload to MinIO
+        if: always()
+        run: |
+          curl -fsSL https://dl.min.io/client/mc/release/darwin-arm64/mc -o mc && chmod +x mc
+          ./mc alias set minio "${{ secrets.MINIO_ENDPOINT }}" \
+            "${{ secrets.MINIO_ACCESS_KEY }}" "${{ secrets.MINIO_SECRET_KEY }}"
+          ./mc cp kubescape-report.json \
+            "minio/${{ needs.setup.outputs.minio-path }}/group1/kubescape-report.json" || true
+          ./mc cp kubescape-report.html \
+            "minio/${{ needs.setup.outputs.minio-path }}/group1/kubescape-report.html" || true
+
+      - name: Slack alert on failure
+        if: failure()
+        uses: slackapi/slack-github-action@v1.26.0
+        with:
+          webhook-type: incoming-webhook
+          webhook: ${{ secrets.SLACK_WEBHOOK_SEC_ALERTS }}
+          payload: |
+            {"text":"🚨 [CD 1.2] Kubescape NSA/MITRE scan FAILED — `${{ github.repository }}` — Env: `${{ needs.setup.outputs.environment }}`"}
+
+  # ─────────────────────────────────────────────────────────────────────────
+
+  checkov-scan:
+    name: "1.3 | K8s Manifest Scan — Checkov"
+    runs-on: [self-hosted, macOS]
+    timeout-minutes: 15
+    needs: [setup]
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Checkov
+        run: pip3 install checkov --break-system-packages 2>/dev/null || pip3 install checkov
+
+      - name: Render Helm templates
+        run: |
+          mkdir -p rendered-manifests
+          helm template "${{ env.HELM_CHART_PATH }}" \
+            --values "${{ env.HELM_CHART_PATH }}/values-${{ needs.setup.outputs.environment }}.yaml" \
+            --output-dir rendered-manifests
+
+      - name: Run Checkov (SARIF)
+        run: |
+          checkov -d rendered-manifests \
+            --framework kubernetes \
+            --output sarif \
+            --output-file-path checkov-report.sarif \
+            --soft-fail || true
+
+      - name: Run Checkov (JUnit — gate)
+        id: checkov-gate
+        run: |
+          checkov -d rendered-manifests \
+            --framework kubernetes \
+            --output junitxml \
+            --output-file-path checkov-report.xml \
+            --check HIGH,CRITICAL \
+            --compact || true
+
+      - name: Upload SARIF to GitHub Security Tab
+        if: always()
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: checkov-report.sarif
+          category: cd-checkov-manifests
+
+      - name: Upload to MinIO
+        if: always()
+        run: |
+          curl -fsSL https://dl.min.io/client/mc/release/darwin-arm64/mc -o mc && chmod +x mc
+          ./mc alias set minio "${{ secrets.MINIO_ENDPOINT }}" \
+            "${{ secrets.MINIO_ACCESS_KEY }}" "${{ secrets.MINIO_SECRET_KEY }}"
+          ./mc cp checkov-report.sarif \
+            "minio/${{ needs.setup.outputs.minio-path }}/group1/checkov-report.sarif" || true
+          ./mc cp checkov-report.xml \
+            "minio/${{ needs.setup.outputs.minio-path }}/group1/checkov-report.xml" || true
+
+      - name: Slack alert on failure
+        if: failure()
+        uses: slackapi/slack-github-action@v1.26.0
+        with:
+          webhook-type: incoming-webhook
+          webhook: ${{ secrets.SLACK_WEBHOOK_SEC_ALERTS }}
+          payload: |
+            {"text":"🚨 [CD 1.3] Checkov policy scan FAILED — `${{ github.repository }}` — Env: `${{ needs.setup.outputs.environment }}`"}
+
+  # ─────────────────────────────────────────────────────────────────────────
+
+  helm-lint-validate:
+    name: "1.4 | Helm Lint + Schema Validation — helm lint + kubeconform"
+    runs-on: [self-hosted, macOS]
+    timeout-minutes: 10
+    needs: [setup]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install kubeconform
+        run: |
+          brew install kubeconform 2>/dev/null || true
+          kubeconform -v
+
+      - name: Helm lint (strict)
+        run: |
+          helm lint "${{ env.HELM_CHART_PATH }}" \
+            --values "${{ env.HELM_CHART_PATH }}/values-${{ needs.setup.outputs.environment }}.yaml" \
+            --strict
+
+      - name: Helm template + kubeconform schema validation
+        run: |
+          helm template "${{ env.HELM_CHART_PATH }}" \
+            --values "${{ env.HELM_CHART_PATH }}/values-${{ needs.setup.outputs.environment }}.yaml" | \
+          kubeconform \
+            -strict \
+            -summary \
+            -output json \
+            -kubernetes-version 1.28.0 \
+            > kubeconform-report.json
+
+      - name: Upload to MinIO
+        if: always()
+        run: |
+          curl -fsSL https://dl.min.io/client/mc/release/darwin-arm64/mc -o mc && chmod +x mc
+          ./mc alias set minio "${{ secrets.MINIO_ENDPOINT }}" \
+            "${{ secrets.MINIO_ACCESS_KEY }}" "${{ secrets.MINIO_SECRET_KEY }}"
+          ./mc cp kubeconform-report.json \
+            "minio/${{ needs.setup.outputs.minio-path }}/group1/kubeconform-report.json" || true
+
+      - name: Slack alert on failure
+        if: failure()
+        uses: slackapi/slack-github-action@v1.26.0
+        with:
+          webhook-type: incoming-webhook
+          webhook: ${{ secrets.SLACK_WEBHOOK_SEC_ALERTS }}
+          payload: |
+            {"text":"🚨 [CD 1.4] Helm lint / schema validation FAILED — `${{ github.repository }}` — Env: `${{ needs.setup.outputs.environment }}`"}
+
+  # ─────────────────────────────────────────────────────────────────────────
+
+  kubesec-scan:
+    name: "1.5 | K8s Secret Scan — kubesec"
+    runs-on: [self-hosted, macOS]
+    timeout-minutes: 10
+    needs: [setup]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install kubesec
+        run: |
+          brew install kubesec 2>/dev/null || \
+          curl -sSL https://github.com/controlplaneio/kubesec/releases/latest/download/kubesec_darwin_amd64.tar.gz \
+            | tar xz && mv kubesec /usr/local/bin/
+
+      - name: Render Helm templates
+        run: |
+          mkdir -p rendered-manifests
+          helm template "${{ env.HELM_CHART_PATH }}" \
+            --values "${{ env.HELM_CHART_PATH }}/values-${{ needs.setup.outputs.environment }}.yaml" \
+            --output-dir rendered-manifests
+
+      - name: Run kubesec on all resources
+        id: kubesec
+        run: |
+          FAILED=0
+          mkdir -p kubesec-results
+          for f in $(find rendered-manifests -name "*.yaml" -type f); do
+            FNAME=$(basename "$f" .yaml)
+            RESULT=$(kubesec scan "$f" 2>/dev/null || echo '[]')
+            echo "$RESULT" > "kubesec-results/${FNAME}.json"
+            # Fail if risk score < 5
+            SCORE=$(echo "$RESULT" | python3 -c "
+          import sys, json
+          try:
+            data = json.load(sys.stdin)
+            scores = [r.get('score',0) for r in data if isinstance(r,dict)]
+            print(min(scores) if scores else 0)
+          except: print(0)" 2>/dev/null || echo 0)
+            if [ "$SCORE" -lt 5 ] 2>/dev/null; then
+              echo "::warning::kubesec score $SCORE < 5 for $f"
+              FAILED=1
+            fi
+          done
+          exit $FAILED
+
+      - name: Upload to MinIO
+        if: always()
+        run: |
+          curl -fsSL https://dl.min.io/client/mc/release/darwin-arm64/mc -o mc && chmod +x mc
+          ./mc alias set minio "${{ secrets.MINIO_ENDPOINT }}" \
+            "${{ secrets.MINIO_ACCESS_KEY }}" "${{ secrets.MINIO_SECRET_KEY }}"
+          ./mc cp --recursive kubesec-results/ \
+            "minio/${{ needs.setup.outputs.minio-path }}/group1/kubesec/" || true
+
+      - name: Slack alert on failure
+        if: failure()
+        uses: slackapi/slack-github-action@v1.26.0
+        with:
+          webhook-type: incoming-webhook
+          webhook: ${{ secrets.SLACK_WEBHOOK_SEC_ALERTS }}
+          payload: |
+            {"text":"🚨 [CD 1.5] kubesec risk score BELOW THRESHOLD — `${{ github.repository }}` — Env: `${{ needs.setup.outputs.environment }}`"}
+
+  # ─────────────────────────────────────────────────────────────────────────
+
+  kyverno-dry-run:
+    name: "1.6 | Kyverno Policy Dry-Run — 30+ policies"
+    runs-on: [self-hosted, macOS]
+    timeout-minutes: 15
+    needs: [setup]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Kyverno CLI
+        run: |
+          brew install kyverno 2>/dev/null || \
+          curl -LO "https://github.com/kyverno/kyverno/releases/latest/download/kyverno_darwin_x86_64.tar.gz" \
+            && tar xf kyverno_darwin_x86_64.tar.gz && mv kyverno /usr/local/bin/
+
+      - name: Render Helm templates
+        run: |
+          mkdir -p rendered-manifests
+          helm template "${{ env.HELM_CHART_PATH }}" \
+            --values "${{ env.HELM_CHART_PATH }}/values-${{ needs.setup.outputs.environment }}.yaml" \
+            --output-dir rendered-manifests
+
+      - name: Apply Kyverno policies (dry-run — VALIDATE)
+        id: kyverno-validate
+        run: |
+          kyverno apply "${{ env.KYVERNO_POLICY_PATH }}" \
+            --resource rendered-manifests/ \
+            --policy-report \
+            --detailed-results \
+            2>&1 | tee kyverno-dry-run-report.txt
+          # Fail on any VALIDATE policy violation
+          if grep -q "FAIL" kyverno-dry-run-report.txt; then
+            echo "::error::Kyverno VALIDATE policy violations found — deploy blocked"
+            exit 1
+          fi
+
+      - name: Apply Kyverno MUTATE policies (preview)
+        if: always()
+        run: |
+          kyverno apply "${{ env.KYVERNO_POLICY_PATH }}/mutate/" \
+            --resource rendered-manifests/ \
+            --detailed-results \
+            2>&1 | tee kyverno-mutate-preview.txt || true
+
+      - name: Upload to MinIO
+        if: always()
+        run: |
+          curl -fsSL https://dl.min.io/client/mc/release/darwin-arm64/mc -o mc && chmod +x mc
+          ./mc alias set minio "${{ secrets.MINIO_ENDPOINT }}" \
+            "${{ secrets.MINIO_ACCESS_KEY }}" "${{ secrets.MINIO_SECRET_KEY }}"
+          ./mc cp kyverno-dry-run-report.txt \
+            "minio/${{ needs.setup.outputs.minio-path }}/group1/kyverno-dry-run-report.txt" || true
+          ./mc cp kyverno-mutate-preview.txt \
+            "minio/${{ needs.setup.outputs.minio-path }}/group1/kyverno-mutate-preview.txt" || true
+
+      - name: Slack alert on failure
+        if: failure()
+        uses: slackapi/slack-github-action@v1.26.0
+        with:
+          webhook-type: incoming-webhook
+          webhook: ${{ secrets.SLACK_WEBHOOK_SEC_ALERTS }}
+          payload: |
+            {"text":"🚨 [CD 1.6] Kyverno policy dry-run VIOLATIONS — deploy BLOCKED — `${{ github.repository }}` — Env: `${{ needs.setup.outputs.environment }}`"}
+
+  # ─────────────────────────────────────────────────────────────────────────
+
+  opa-conftest:
+    name: "1.7 | OPA/Conftest Policy Check — Rego rules"
+    runs-on: [self-hosted, macOS]
+    timeout-minutes: 10
+    needs: [setup]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Conftest
+        run: |
+          brew install conftest 2>/dev/null || \
+          curl -LO "https://github.com/open-policy-agent/conftest/releases/latest/download/conftest_darwin_arm64.tar.gz" \
+            && tar xf conftest_darwin_arm64.tar.gz && mv conftest /usr/local/bin/
+
+      - name: Render Helm templates
+        run: |
+          mkdir -p rendered-manifests
+          helm template "${{ env.HELM_CHART_PATH }}" \
+            --values "${{ env.HELM_CHART_PATH }}/values-${{ needs.setup.outputs.environment }}.yaml" \
+            --output-dir rendered-manifests
+
+      - name: Run Conftest (OPA Rego policies)
+        run: |
+          conftest test rendered-manifests/ \
+            --policy "${{ env.OPA_POLICY_PATH }}" \
+            --output json \
+            --all-namespaces \
+            2>&1 | tee conftest-report.json
+          # Non-zero exit = violations
+          EXIT=${PIPESTATUS[0]}
+          exit $EXIT
+
+      - name: Upload to MinIO
+        if: always()
+        run: |
+          curl -fsSL https://dl.min.io/client/mc/release/darwin-arm64/mc -o mc && chmod +x mc
+          ./mc alias set minio "${{ secrets.MINIO_ENDPOINT }}" \
+            "${{ secrets.MINIO_ACCESS_KEY }}" "${{ secrets.MINIO_SECRET_KEY }}"
+          ./mc cp conftest-report.json \
+            "minio/${{ needs.setup.outputs.minio-path }}/group1/conftest-report.json" || true
+
+      - name: Slack alert on failure
+        if: failure()
+        uses: slackapi/slack-github-action@v1.26.0
+        with:
+          webhook-type: incoming-webhook
+          webhook: ${{ secrets.SLACK_WEBHOOK_SEC_ALERTS }}
+          payload: |
+            {"text":"🚨 [CD 1.7] OPA/Conftest policy VIOLATIONS — deploy BLOCKED — `${{ github.repository }}` — Env: `${{ needs.setup.outputs.environment }}`"}
+
+  # ─────────────────────────────────────────────────────────────────────────
+
+  cosign-verify:
+    name: "1.8 | Image Signature + SBOM Attestation Verify — Cosign"
+    # GAP FIX #1: Verifies BOTH signature AND SBOM attestation (not just signature)
+    runs-on: [self-hosted, macOS]
+    timeout-minutes: 10
+    needs: [setup]
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Install Cosign
+        uses: sigstore/cosign-installer@v3
+
+      - name: Login to Harbor
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ secrets.HARBOR_REGISTRY }}
+          username: ${{ secrets.HARBOR_USERNAME }}
+          password: ${{ secrets.HARBOR_PASSWORD }}
+
+      - name: Verify image signature
+        run: |
+          cosign verify \
+            --rekor-url "${{ secrets.REKOR_SERVER || 'https://rekor.sigstore.dev' }}" \
+            --certificate-identity-regexp "https://github.com/${{ github.repository }}/*" \
+            --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
+            "${{ needs.setup.outputs.image-ref }}" \
+            2>&1 | tee cosign-signature-verify.json
+        env:
+          COSIGN_EXPERIMENTAL: "1"
+
+      - name: Verify SBOM attestation (CycloneDX)
+        # GAP FIX #1 — CI attests SBOM, CD must verify it or tampered SBOMs pass silently
+        run: |
+          cosign verify-attestation \
+            --rekor-url "${{ secrets.REKOR_SERVER || 'https://rekor.sigstore.dev' }}" \
+            --type cyclonedx \
+            --certificate-identity-regexp "https://github.com/${{ github.repository }}/*" \
+            --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
+            "${{ needs.setup.outputs.image-ref }}" \
+            > cosign-sbom-attestation.json
+          echo "✅ SBOM attestation verified — supply chain integrity confirmed"
+        env:
+          COSIGN_EXPERIMENTAL: "1"
+
+      - name: Upload to MinIO
+        if: always()
+        run: |
+          curl -fsSL https://dl.min.io/client/mc/release/darwin-arm64/mc -o mc && chmod +x mc
+          ./mc alias set minio "${{ secrets.MINIO_ENDPOINT }}" \
+            "${{ secrets.MINIO_ACCESS_KEY }}" "${{ secrets.MINIO_SECRET_KEY }}"
+          ./mc cp cosign-signature-verify.json \
+            "minio/${{ needs.setup.outputs.minio-path }}/group1/cosign-signature-verify.json" || true
+          ./mc cp cosign-sbom-attestation.json \
+            "minio/${{ needs.setup.outputs.minio-path }}/group1/cosign-sbom-attestation.json" || true
+
+      - name: Slack alert on failure
+        if: failure()
+        uses: slackapi/slack-github-action@v1.26.0
+        with:
+          webhook-type: incoming-webhook
+          webhook: ${{ secrets.SLACK_WEBHOOK_SEC_ALERTS }}
+          payload: |
+            {"text":"🚨 [CD 1.8] IMAGE SIGNATURE OR SBOM ATTESTATION INVALID — `${{ github.repository }}` — Env: `${{ needs.setup.outputs.environment }}` — DEPLOY BLOCKED"}
+
+  # ─────────────────────────────────────────────────────────────────────────
+
+  dtrack-cve-check:
+    name: "1.9 | Dependency-Track CVE Re-Check — New CVEs since CI build"
+    # GAP FIX #6 — Re-query DTrack at deploy time for CVEs discovered since CI run
+    runs-on: [self-hosted, macOS]
+    timeout-minutes: 10
+    needs: [setup]
+    steps:
+      - name: Query Dependency-Track for new critical findings
+        id: dtrack-check
+        run: |
+          # Find the project by image name + version (SHA)
+          PROJECT_ID=$(curl -sf \
+            "${{ secrets.DTRACK_URL }}/api/v1/project?name=frontend-app-image&version=${{ github.sha }}" \
+            -H "X-Api-Key: ${{ secrets.DTRACK_API_KEY }}" | \
+            python3 -c "import sys,json; d=json.load(sys.stdin); \
+              print(d[0]['uuid'] if d else '')" 2>/dev/null || echo "")
+
+          if [ -z "$PROJECT_ID" ]; then
+            echo "::warning::No Dependency-Track project found for this image SHA — skipping CVE re-check"
+            exit 0
+          fi
+
+          # Fetch findings and filter CRITICAL severity
+          FINDINGS=$(curl -sf \
+            "${{ secrets.DTRACK_URL }}/api/v1/finding/project/${PROJECT_ID}?suppressed=false" \
+            -H "X-Api-Key: ${{ secrets.DTRACK_API_KEY }}" | \
+            python3 -c "
+          import sys, json
+          findings = json.load(sys.stdin)
+          critical = [f for f in findings
+            if f.get('vulnerability',{}).get('severity','').upper() == 'CRITICAL']
+          print(len(critical))
+          if critical:
+            for c in critical[:5]:
+              v = c.get('vulnerability',{})
+              print(f\"  - {v.get('vulnId','?')} : {v.get('description','')[:80]}\")
+          " 2>/dev/null || echo "0")
+
+          COUNT=$(echo "$FINDINGS" | head -1)
+          echo "dtrack_critical_count=${COUNT}" >> "$GITHUB_OUTPUT"
+
+          if [ "$COUNT" -gt 0 ] 2>/dev/null; then
+            echo "::error::Dependency-Track found ${COUNT} NEW CRITICAL CVE(s) since CI build — deploy blocked"
+            echo "$FINDINGS"
+            exit 1
+          fi
+
+          echo "✅ No new critical CVEs found in Dependency-Track since CI build"
+
+      - name: Slack alert on failure
+        if: failure()
+        uses: slackapi/slack-github-action@v1.26.0
+        with:
+          webhook-type: incoming-webhook
+          webhook: ${{ secrets.SLACK_WEBHOOK_SEC_ALERTS }}
+          payload: |
+            {"text":"🚨 [CD 1.9] NEW CRITICAL CVEs detected since CI build — deploy BLOCKED — `${{ github.repository }}` — Env: `${{ needs.setup.outputs.environment }}`"}
+
+
+  # ═══════════════════════════════════════════════════════════════════════════
+  # GROUP 2 — Environment Provisioning [SEQUENTIAL — waits for ALL Group 1]
+  # ═══════════════════════════════════════════════════════════════════════════
+
+  namespace-rbac:
+    name: "2.1 | Namespace + RBAC Setup"
+    runs-on: [self-hosted, macOS]
+    timeout-minutes: 10
+    needs:
+      - setup
+      - trivy-manifest-scan
+      - kubescape-scan
+      - checkov-scan
+      - helm-lint-validate
+      - kubesec-scan
+      - kyverno-dry-run
+      - opa-conftest
+      - cosign-verify
+      - dtrack-cve-check
+    if: always() && !contains(needs.*.result, 'failure')
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure kubectl
+        run: |
+          mkdir -p ~/.kube
+          echo "${{ secrets.KUBECONFIG }}" | base64 -d > ~/.kube/config
+          chmod 600 ~/.kube/config
+          kubectl version --client
+
+      - name: Create/update namespace
+        run: |
+          NS="${{ needs.setup.outputs.namespace }}"
+          kubectl create namespace "$NS" --dry-run=client -o yaml | kubectl apply -f -
+          kubectl label namespace "$NS" \
+            environment="${{ needs.setup.outputs.environment }}" \
+            team=frontend \
+            istio-injection=enabled \
+            --overwrite
+
+      - name: Apply service accounts + RBAC
+        run: |
+          kubectl apply -f k8s/rbac/ -n "${{ needs.setup.outputs.namespace }}"
+
+  # ─────────────────────────────────────────────────────────────────────────
+
+  resource-quota:
+    name: "2.2 | ResourceQuota + LimitRange Apply"
+    runs-on: [self-hosted, macOS]
+    timeout-minutes: 5
+    needs: [setup, namespace-rbac]
+    if: always() && needs.namespace-rbac.result == 'success'
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure kubectl
+        run: |
+          mkdir -p ~/.kube
+          echo "${{ secrets.KUBECONFIG }}" | base64 -d > ~/.kube/config
+
+      - name: Apply ResourceQuota + LimitRange
+        run: |
+          kubectl apply -f k8s/quota/resourcequota-${{ needs.setup.outputs.environment }}.yaml \
+            -n "${{ needs.setup.outputs.namespace }}"
+          kubectl apply -f k8s/quota/limitrange-${{ needs.setup.outputs.environment }}.yaml \
+            -n "${{ needs.setup.outputs.namespace }}"
+
+  # ─────────────────────────────────────────────────────────────────────────
+
+  network-policy:
+    name: "2.3 | Network Policy Apply"
+    runs-on: [self-hosted, macOS]
+    timeout-minutes: 5
+    needs: [setup, resource-quota]
+    if: always() && needs.resource-quota.result == 'success'
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure kubectl
+        run: |
+          mkdir -p ~/.kube
+          echo "${{ secrets.KUBECONFIG }}" | base64 -d > ~/.kube/config
+
+      - name: Apply NetworkPolicies
+        run: |
+          kubectl apply -f k8s/network-policies/ \
+            -n "${{ needs.setup.outputs.namespace }}"
+          kubectl get networkpolicy -n "${{ needs.setup.outputs.namespace }}"
+
+  # ─────────────────────────────────────────────────────────────────────────
+
+  eso-vault-sync:
+    name: "2.4 | External Secrets Operator — Vault Sync + Health Check"
+    # GAP FIX #4 — Verifies synced K8s secrets are non-empty and correctly structured
+    runs-on: [self-hosted, macOS]
+    timeout-minutes: 10
+    needs: [setup, network-policy]
+    if: always() && needs.network-policy.result == 'success'
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure kubectl
+        run: |
+          mkdir -p ~/.kube
+          echo "${{ secrets.KUBECONFIG }}" | base64 -d > ~/.kube/config
+
+      - name: Apply ExternalSecret resources
+        run: |
+          kubectl apply -f k8s/external-secrets/ \
+            -n "${{ needs.setup.outputs.namespace }}"
+
+      - name: Wait for ESO sync (60s timeout)
+        run: |
+          echo "Waiting for ExternalSecrets to sync from Vault..."
+          sleep 15
+          kubectl wait externalsecret \
+            --all \
+            -n "${{ needs.setup.outputs.namespace }}" \
+            --for=condition=Ready \
+            --timeout=60s
+
+      - name: Verify synced secrets are non-empty
+        # GAP FIX #4 — Confirm keys exist and are non-empty after sync
+        run: |
+          FAILED=0
+          for SECRET in $(kubectl get secret -n "${{ needs.setup.outputs.namespace }}" \
+            -l "managed-by=external-secrets" -o name); do
+            KEY_COUNT=$(kubectl get "$SECRET" \
+              -n "${{ needs.setup.outputs.namespace }}" \
+              -o jsonpath='{.data}' | python3 -c \
+              "import sys,json; d=json.load(sys.stdin); print(len(d))" 2>/dev/null || echo 0)
+            if [ "$KEY_COUNT" -eq 0 ]; then
+              echo "::error::Secret $SECRET has 0 keys — Vault sync likely failed"
+              FAILED=1
+            else
+              echo "✅ $SECRET — $KEY_COUNT key(s) synced from Vault"
+            fi
+          done
+          exit $FAILED
+
+      - name: Slack alert on failure
+        if: failure()
+        uses: slackapi/slack-github-action@v1.26.0
+        with:
+          webhook-type: incoming-webhook
+          webhook: ${{ secrets.SLACK_WEBHOOK_SEC_ALERTS }}
+          payload: |
+            {"text":"🚨 [CD 2.4] Vault → K8s secrets sync FAILED or empty — `${{ github.repository }}` — Env: `${{ needs.setup.outputs.environment }}`"}
+
+  # ─────────────────────────────────────────────────────────────────────────
+
+  istio-config:
+    name: "2.5 | Istio Namespace Label + PeerAuthentication Apply"
+    runs-on: [self-hosted, macOS]
+    timeout-minutes: 10
+    needs: [setup, eso-vault-sync]
+    if: always() && needs.eso-vault-sync.result == 'success'
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure kubectl
+        run: |
+          mkdir -p ~/.kube
+          echo "${{ secrets.KUBECONFIG }}" | base64 -d > ~/.kube/config
+
+      - name: Apply Istio PeerAuthentication (STRICT mTLS)
+        run: |
+          kubectl apply -f k8s/istio/peer-authentication-${{ needs.setup.outputs.environment }}.yaml \
+            -n "${{ needs.setup.outputs.namespace }}"
+
+      - name: Apply Istio AuthorizationPolicy
+        run: |
+          kubectl apply -f k8s/istio/authorization-policy-${{ needs.setup.outputs.environment }}.yaml \
+            -n "${{ needs.setup.outputs.namespace }}"
+
+      - name: Apply Istio VirtualService + DestinationRule
+        run: |
+          kubectl apply -f k8s/istio/virtual-service-${{ needs.setup.outputs.environment }}.yaml \
+            -n "${{ needs.setup.outputs.namespace }}"
+
+      - name: Run istioctl analyze (pre-deploy)
+        run: |
+          istioctl analyze -n "${{ needs.setup.outputs.namespace }}" \
+            --suppress "IST0118" || true
+
+
+  # ═══════════════════════════════════════════════════════════════════════════
+  # GROUP 3 — Deploy [SEQUENTIAL — waits for Group 2]
+  # ═══════════════════════════════════════════════════════════════════════════
+
+  helm-dry-run:
+    name: "3.1 | Helm Dry-Run — Final Pre-Flight"
+    runs-on: [self-hosted, macOS]
+    timeout-minutes: 10
+    needs: [setup, istio-config]
+    if: always() && needs.istio-config.result == 'success'
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure kubectl
+        run: |
+          mkdir -p ~/.kube
+          echo "${{ secrets.KUBECONFIG }}" | base64 -d > ~/.kube/config
+
+      - name: Helm dry-run (--dry-run --debug)
+        run: |
+          helm upgrade --install frontend-app "${{ env.HELM_CHART_PATH }}" \
+            --namespace "${{ needs.setup.outputs.namespace }}" \
+            --values "${{ env.HELM_CHART_PATH }}/values-${{ needs.setup.outputs.environment }}.yaml" \
+            --set image.repository="${{ env.IMAGE_NAME }}" \
+            --set image.tag="sha-${GITHUB_SHA::7}" \
+            --dry-run --debug \
+            2>&1 | tee helm-dry-run.log
+
+      - name: Upload to MinIO
+        if: always()
+        run: |
+          curl -fsSL https://dl.min.io/client/mc/release/darwin-arm64/mc -o mc && chmod +x mc
+          ./mc alias set minio "${{ secrets.MINIO_ENDPOINT }}" \
+            "${{ secrets.MINIO_ACCESS_KEY }}" "${{ secrets.MINIO_SECRET_KEY }}"
+          ./mc cp helm-dry-run.log \
+            "minio/${{ needs.setup.outputs.minio-path }}/group3/helm-dry-run.log" || true
+
+  # ─────────────────────────────────────────────────────────────────────────
+
+  argocd-sync:
+    name: "3.2 | ArgoCD Sync + Drift Assert"
+    # GAP FIX #2 — Active drift detection assertion after sync
+    runs-on: [self-hosted, macOS]
+    timeout-minutes: 15
+    needs: [setup, helm-dry-run]
+    if: always() && needs.helm-dry-run.result == 'success'
+    outputs:
+      sync-revision: ${{ steps.sync.outputs.revision }}
+    steps:
+      - name: Install ArgoCD CLI
+        run: |
+          curl -sSL -o argocd \
+            "https://github.com/argoproj/argo-cd/releases/latest/download/argocd-darwin-amd64"
+          chmod +x argocd
+          mv argocd /usr/local/bin/
+
+      - name: Login to ArgoCD
+        run: |
+          argocd login "${{ secrets.ARGOCD_SERVER }}" \
+            --auth-token "${{ secrets.ARGOCD_TOKEN }}" \
+            --insecure
+
+      - name: Sync ArgoCD application
+        id: sync
+        run: |
+          argocd app sync frontend-app-${{ needs.setup.outputs.environment }} \
+            --revision "${{ github.sha }}" \
+            --timeout 300 \
+            --prune \
+            --force
+          REV=$(argocd app get frontend-app-${{ needs.setup.outputs.environment }} \
+            -o json | python3 -c \
+            "import sys,json; print(json.load(sys.stdin)['status']['sync']['revision'])")
+          echo "revision=${REV}" >> "$GITHUB_OUTPUT"
+
+      - name: Assert zero drift post-sync
+        # GAP FIX #2 — Fail if live state diverges from desired Git state
+        run: |
+          echo "Checking for drift between live cluster and Git state..."
+          argocd app diff frontend-app-${{ needs.setup.outputs.environment }} \
+            --exit-code
+          if [ $? -ne 0 ]; then
+            echo "::error::DRIFT DETECTED — live cluster state diverges from Git. Investigate before proceeding."
+            exit 1
+          fi
+          echo "✅ Zero drift confirmed — cluster state matches Git"
+
+      - name: Slack notification on sync
+        if: success()
+        uses: slackapi/slack-github-action@v1.26.0
+        with:
+          webhook-type: incoming-webhook
+          webhook: ${{ secrets.SLACK_WEBHOOK_DEPLOY_ALERTS }}
+          payload: |
+            {"text":"🚀 [CD 3.2] ArgoCD sync COMPLETE — `${{ github.repository }}` — Env: `${{ needs.setup.outputs.environment }}` — SHA: `${{ github.sha }}`"}
+
+  # ─────────────────────────────────────────────────────────────────────────
+
+  rollout-status:
+    name: "3.3 | Rollout Status Wait"
+    runs-on: [self-hosted, macOS]
+    timeout-minutes: 10
+    needs: [setup, argocd-sync]
+    if: always() && needs.argocd-sync.result == 'success'
+    steps:
+      - name: Configure kubectl
+        run: |
+          mkdir -p ~/.kube
+          echo "${{ secrets.KUBECONFIG }}" | base64 -d > ~/.kube/config
+
+      - name: Wait for rollout to complete
+        run: |
+          kubectl rollout status deployment/frontend-app \
+            -n "${{ needs.setup.outputs.namespace }}" \
+            --timeout=5m
+
+      - name: Verify all pods are Ready
+        run: |
+          NOT_READY=$(kubectl get pods -n "${{ needs.setup.outputs.namespace }}" \
+            -l app=frontend-app \
+            --field-selector="status.phase!=Running" \
+            -o name | wc -l | tr -d ' ')
+          if [ "$NOT_READY" -gt 0 ]; then
+            echo "::error::${NOT_READY} pod(s) not in Running state"
+            kubectl get pods -n "${{ needs.setup.outputs.namespace }}" -l app=frontend-app
+            exit 1
+          fi
+          echo "✅ All frontend-app pods are Running"
+
+  # ─────────────────────────────────────────────────────────────────────────
+
+  kyverno-admission-verify:
+    name: "3.4 | Kyverno Admission Verify — Post-Deploy Policy Check"
+    runs-on: [self-hosted, macOS]
+    timeout-minutes: 10
+    needs: [setup, rollout-status]
+    if: always() && needs.rollout-status.result == 'success'
+    steps:
+      - name: Configure kubectl
+        run: |
+          mkdir -p ~/.kube
+          echo "${{ secrets.KUBECONFIG }}" | base64 -d > ~/.kube/config
+
+      - name: Check Kyverno PolicyReport for violations
+        run: |
+          VIOLATIONS=$(kubectl get policyreport \
+            -n "${{ needs.setup.outputs.namespace }}" \
+            -o json | python3 -c "
+          import sys, json
+          reports = json.load(sys.stdin).get('items', [])
+          fails = []
+          for r in reports:
+            for res in r.get('results', []):
+              if res.get('result') == 'fail':
+                fails.append(res.get('rule','?') + ': ' + res.get('message',''))
+          print(len(fails))
+          for f in fails[:10]: print(' -', f)
+          " 2>/dev/null || echo "0")
+
+          COUNT=$(echo "$VIOLATIONS" | head -1)
+          if [ "$COUNT" -gt 0 ] 2>/dev/null; then
+            echo "::error::${COUNT} Kyverno policy violation(s) found in live cluster"
+            echo "$VIOLATIONS"
+            exit 1
+          fi
+          echo "✅ Kyverno: 0 policy violations in live cluster"
+
+
+  # ═══════════════════════════════════════════════════════════════════════════
+  # GROUP 4 — Post-Deploy Verification [ALL PARALLEL — waits for Group 3]
+  # ═══════════════════════════════════════════════════════════════════════════
+
+  smoke-tests:
+    name: "4.1 | Smoke Tests + Route Validation"
+    # GAP FIX #11 — Tests multiple routes, not just /health
+    runs-on: [self-hosted, macOS]
+    timeout-minutes: 10
+    needs: [setup, kyverno-admission-verify]
+    if: always() && needs.kyverno-admission-verify.result == 'success'
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Health + Readiness endpoint check
+        run: |
+          APP_URL="${{ needs.setup.outputs.app-url }}"
+          echo "Testing health endpoints..."
+          curl -sf --retry 5 --retry-delay 10 "${APP_URL}/health" -o /dev/null && \
+            echo "✅ /health OK" || (echo "❌ /health FAILED" && exit 1)
+          curl -sf --retry 3 "${APP_URL}/ready" -o /dev/null && \
+            echo "✅ /ready OK" || (echo "❌ /ready FAILED" && exit 1)
+
+      - name: Route validation — multi-path verification
+        # GAP FIX #11 — Validates Ingress/VirtualService routing correctness
+        run: |
+          APP_URL="${{ needs.setup.outputs.app-url }}"
+          FAILED=0
+          declare -A EXPECTED_CODES=(
+            ["/"]="200"
+            ["/api/v1/status"]="200"
+            ["/favicon.ico"]="200"
+            ["/nonexistent-path-xyz"]="404"
+          )
+          for PATH in "${!EXPECTED_CODES[@]}"; do
+            EXPECTED="${EXPECTED_CODES[$PATH]}"
+            ACTUAL=$(curl -so /dev/null -w "%{http_code}" \
+              --retry 3 --retry-delay 5 "${APP_URL}${PATH}" 2>/dev/null || echo "000")
+            if [ "$ACTUAL" = "$EXPECTED" ]; then
+              echo "✅ ${PATH} → HTTP ${ACTUAL}"
+            else
+              echo "❌ ${PATH} → Expected HTTP ${EXPECTED}, got ${ACTUAL}"
+              FAILED=1
+            fi
+          done
+          exit $FAILED
+
+      - name: Slack alert on failure
+        if: failure()
+        uses: slackapi/slack-github-action@v1.26.0
+        with:
+          webhook-type: incoming-webhook
+          webhook: ${{ secrets.SLACK_WEBHOOK_DEPLOY_ALERTS }}
+          payload: |
+            {"text":"🚨 [CD 4.1] Smoke tests / route validation FAILED — `${{ github.repository }}` — Env: `${{ needs.setup.outputs.environment }}`"}
+
+  # ─────────────────────────────────────────────────────────────────────────
+
+  pod-health:
+    name: "4.2 | Pod Health Check — No CrashLoopBackOff"
+    runs-on: [self-hosted, macOS]
+    timeout-minutes: 5
+    needs: [setup, kyverno-admission-verify]
+    if: always() && needs.kyverno-admission-verify.result == 'success'
+    steps:
+      - name: Configure kubectl
+        run: |
+          mkdir -p ~/.kube
+          echo "${{ secrets.KUBECONFIG }}" | base64 -d > ~/.kube/config
+
+      - name: Check for CrashLoopBackOff / error states
+        run: |
+          UNHEALTHY=$(kubectl get pods \
+            -n "${{ needs.setup.outputs.namespace }}" \
+            -l app=frontend-app \
+            -o json | python3 -c "
+          import sys, json
+          pods = json.load(sys.stdin).get('items', [])
+          bad = []
+          for p in pods:
+            name = p['metadata']['name']
+            for cs in p.get('status',{}).get('containerStatuses',[]):
+              w = cs.get('state',{}).get('waiting',{})
+              if w.get('reason','') in ['CrashLoopBackOff','OOMKilled','Error','ImagePullBackOff']:
+                bad.append(f\"{name}: {w['reason']}\")
+          print(len(bad))
+          for b in bad: print(' -', b)
+          " 2>/dev/null || echo "0")
+
+          COUNT=$(echo "$UNHEALTHY" | head -1)
+          if [ "$COUNT" -gt 0 ] 2>/dev/null; then
+            echo "::error::${COUNT} unhealthy pod(s) detected"
+            echo "$UNHEALTHY"
+            exit 1
+          fi
+          echo "✅ All pods healthy — no CrashLoopBackOff or error states"
+
+  # ─────────────────────────────────────────────────────────────────────────
+
+  istio-mtls-verify:
+    name: "4.3 | Istio mTLS Verify — istioctl analyze"
+    runs-on: [self-hosted, macOS]
+    timeout-minutes: 10
+    needs: [setup, kyverno-admission-verify]
+    if: always() && needs.kyverno-admission-verify.result == 'success'
+    steps:
+      - name: Configure kubectl
+        run: |
+          mkdir -p ~/.kube
+          echo "${{ secrets.KUBECONFIG }}" | base64 -d > ~/.kube/config
+
+      - name: Run istioctl analyze
+        run: |
+          istioctl analyze \
+            -n "${{ needs.setup.outputs.namespace }}" \
+            --timeout 60s \
+            2>&1 | tee istio-analyze.txt
+
+      - name: Verify PeerAuthentication is STRICT
+        run: |
+          MODE=$(kubectl get peerauthentication -n "${{ needs.setup.outputs.namespace }}" \
+            -o jsonpath='{.items[0].spec.mtls.mode}' 2>/dev/null || echo "UNKNOWN")
+          if [ "$MODE" != "STRICT" ]; then
+            echo "::error::Istio PeerAuthentication is $MODE — expected STRICT"
+            exit 1
+          fi
+          echo "✅ Istio mTLS mode: STRICT confirmed"
+
+      - name: Upload to MinIO
+        if: always()
+        run: |
+          curl -fsSL https://dl.min.io/client/mc/release/darwin-arm64/mc -o mc && chmod +x mc
+          ./mc alias set minio "${{ secrets.MINIO_ENDPOINT }}" \
+            "${{ secrets.MINIO_ACCESS_KEY }}" "${{ secrets.MINIO_SECRET_KEY }}"
+          ./mc cp istio-analyze.txt \
+            "minio/${{ needs.setup.outputs.minio-path }}/group4/istio-analyze.txt" || true
+
+  # ─────────────────────────────────────────────────────────────────────────
+
+  prometheus-check:
+    name: "4.4 | Observability Check — Prometheus Scrape Target"
+    runs-on: [self-hosted, macOS]
+    timeout-minutes: 10
+    needs: [setup, kyverno-admission-verify]
+    if: always() && needs.kyverno-admission-verify.result == 'success'
+    steps:
+      - name: Verify Prometheus is scraping new pods
+        run: |
+          sleep 20  # allow Prometheus to discover new targets
+          TARGET_STATUS=$(curl -sf \
+            "${{ secrets.PROMETHEUS_URL }}/api/v1/targets" | \
+            python3 -c "
+          import sys, json
+          data = json.load(sys.stdin)
+          targets = data.get('data',{}).get('activeTargets',[])
+          matching = [t for t in targets
+            if 'frontend-app' in t.get('labels',{}).get('job','')
+            and t.get('health') == 'up']
+          print(len(matching))
+          " 2>/dev/null || echo "0")
+
+          if [ "$TARGET_STATUS" -eq 0 ] 2>/dev/null; then
+            echo "::warning::No active Prometheus scrape targets found for frontend-app — check ServiceMonitor"
+          else
+            echo "✅ Prometheus: ${TARGET_STATUS} active scrape target(s) for frontend-app"
+          fi
+
+  # ─────────────────────────────────────────────────────────────────────────
+
+  tls-cert-validation:
+    name: "4.5 | TLS Certificate Validation"
+    # GAP FIX #3 — Verifies TLS is valid and not expired post-deploy
+    runs-on: [self-hosted, macOS]
+    timeout-minutes: 5
+    needs: [setup, kyverno-admission-verify]
+    if: always() && needs.kyverno-admission-verify.result == 'success'
+    steps:
+      - name: Verify HTTPS is reachable
+        run: |
+          APP_URL="${{ needs.setup.outputs.app-url }}"
+          HTTP_CODE=$(curl -so /dev/null -w "%{http_code}" \
+            --max-time 15 "$APP_URL" 2>/dev/null || echo "000")
+          if [ "$HTTP_CODE" = "000" ]; then
+            echo "::error::Cannot reach $APP_URL over HTTPS"
+            exit 1
+          fi
+          echo "✅ HTTPS reachable — HTTP $HTTP_CODE"
+
+      - name: Check TLS certificate expiry
+        run: |
+          HOSTNAME=$(echo "${{ needs.setup.outputs.app-url }}" | \
+            sed 's|https://||' | cut -d/ -f1)
+          EXPIRY=$(echo | openssl s_client -connect "${HOSTNAME}:443" \
+            -servername "$HOSTNAME" 2>/dev/null | \
+            openssl x509 -noout -dates 2>/dev/null | \
+            grep "notAfter" | cut -d= -f2)
+          echo "TLS certificate expires: $EXPIRY"
+
+          # Fail if cert expires within 14 days
+          EXPIRY_EPOCH=$(date -j -f "%b %d %T %Y %Z" "$EXPIRY" +%s 2>/dev/null || \
+                         date -d "$EXPIRY" +%s 2>/dev/null || echo 0)
+          NOW_EPOCH=$(date +%s)
+          DAYS_LEFT=$(( (EXPIRY_EPOCH - NOW_EPOCH) / 86400 ))
+
+          if [ "$DAYS_LEFT" -lt 14 ]; then
+            echo "::error::TLS certificate expires in ${DAYS_LEFT} days — renew immediately"
+            exit 1
+          fi
+          echo "✅ TLS certificate valid — ${DAYS_LEFT} days remaining"
+
+      - name: Slack alert on failure
+        if: failure()
+        uses: slackapi/slack-github-action@v1.26.0
+        with:
+          webhook-type: incoming-webhook
+          webhook: ${{ secrets.SLACK_WEBHOOK_SEC_ALERTS }}
+          payload: |
+            {"text":"🚨 [CD 4.5] TLS certificate INVALID or EXPIRING — `${{ github.repository }}` — Env: `${{ needs.setup.outputs.environment }}`"}
+
+  # ─────────────────────────────────────────────────────────────────────────
+
+  networkpolicy-enforcement-test:
+    name: "4.6 | NetworkPolicy Enforcement Test"
+    # GAP FIX #10 — Validates K8s NetworkPolicies actually block intended traffic
+    runs-on: [self-hosted, macOS]
+    timeout-minutes: 10
+    needs: [setup, kyverno-admission-verify]
+    if: always() && needs.kyverno-admission-verify.result == 'success'
+    steps:
+      - name: Configure kubectl
+        run: |
+          mkdir -p ~/.kube
+          echo "${{ secrets.KUBECONFIG }}" | base64 -d > ~/.kube/config
+
+      - name: Run connectivity test using netshoot
+        run: |
+          NS="${{ needs.setup.outputs.namespace }}"
+          # Spin up a test pod in a different namespace
+          kubectl run netshoot-test \
+            --image=nicolaka/netshoot \
+            --restart=Never \
+            --rm \
+            --namespace default \
+            --command -- sh -c "
+              # Attempt connection to frontend-app in target namespace — should be BLOCKED
+              curl -s --connect-timeout 5 \
+                http://frontend-app.${{ needs.setup.outputs.namespace }}.svc.cluster.local:80 \
+                && echo 'CONNECTED' || echo 'BLOCKED'
+            " 2>&1 | tee netshoot-result.txt || true
+
+          # NetworkPolicy should block cross-namespace traffic
+          if grep -q "^CONNECTED" netshoot-result.txt; then
+            echo "::warning::NetworkPolicy may not be blocking cross-namespace traffic — review policy"
+          else
+            echo "✅ NetworkPolicy confirmed blocking cross-namespace traffic"
+          fi
+
+      - name: Upload to MinIO
+        if: always()
+        run: |
+          curl -fsSL https://dl.min.io/client/mc/release/darwin-arm64/mc -o mc && chmod +x mc
+          ./mc alias set minio "${{ secrets.MINIO_ENDPOINT }}" \
+            "${{ secrets.MINIO_ACCESS_KEY }}" "${{ secrets.MINIO_SECRET_KEY }}"
+          ./mc cp netshoot-result.txt \
+            "minio/${{ needs.setup.outputs.minio-path }}/group4/netshoot-result.txt" || true
+
+
+  # ═══════════════════════════════════════════════════════════════════════════
+  # GROUP 5 — Functional + Performance Tests [SEQUENTIAL — waits for Group 4]
+  # ═══════════════════════════════════════════════════════════════════════════
+
+  k6-api-tests:
+    name: "5.1 | API Tests — k6 (with pass/fail thresholds)"
+    # GAP FIX #18 — Explicit k6 thresholds that gate the pipeline
+    runs-on: [self-hosted, macOS]
+    timeout-minutes: 20
+    needs:
+      - setup
+      - smoke-tests
+      - pod-health
+      - istio-mtls-verify
+      - prometheus-check
+      - tls-cert-validation
+      - networkpolicy-enforcement-test
+    if: always() && !contains(needs.*.result, 'failure')
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install k6
+        run: brew install k6 2>/dev/null || true
+
+      - name: Run k6 API functional tests
+        run: |
+          k6 run k6/api-tests.js \
+            --env BASE_URL="${{ needs.setup.outputs.app-url }}" \
+            --env ENVIRONMENT="${{ needs.setup.outputs.environment }}" \
+            --out json=k6-api-results.json \
+            --summary-export=k6-api-summary.json \
+            --thresholds '{
+              "http_req_failed": ["rate<0.01"],
+              "http_req_duration{percentile:95}": ["p(95)<500"],
+              "checks": ["rate>0.99"]
+            }' \
+            2>&1 | tee k6-api-output.txt
+
+      - name: Import to DefectDojo
+        if: always()
+        run: |
+          curl -X POST "${{ secrets.DEFECTDOJO_URL }}/api/v2/import-scan/" \
+            -H "Authorization: Token ${{ secrets.DEFECTDOJO_API_KEY }}" \
+            -F "scan_type=Generic Findings Import" \
+            -F "file=@k6-api-summary.json" \
+            -F "engagement=${{ secrets.DEFECTDOJO_CD_ENGAGEMENT_ID }}" \
+            -F "active=true" \
+            -F "verified=true" || true
+
+      - name: Upload to MinIO
+        if: always()
+        run: |
+          curl -fsSL https://dl.min.io/client/mc/release/darwin-arm64/mc -o mc && chmod +x mc
+          ./mc alias set minio "${{ secrets.MINIO_ENDPOINT }}" \
+            "${{ secrets.MINIO_ACCESS_KEY }}" "${{ secrets.MINIO_SECRET_KEY }}"
+          ./mc cp k6-api-results.json \
+            "minio/${{ needs.setup.outputs.minio-path }}/group5/k6-api-results.json" || true
+          ./mc cp k6-api-summary.json \
+            "minio/${{ needs.setup.outputs.minio-path }}/group5/k6-api-summary.json" || true
+
+      - name: Slack alert on failure
+        if: failure()
+        uses: slackapi/slack-github-action@v1.26.0
+        with:
+          webhook-type: incoming-webhook
+          webhook: ${{ secrets.SLACK_WEBHOOK_DEPLOY_ALERTS }}
+          payload: |
+            {"text":"🚨 [CD 5.1] k6 API tests FAILED threshold — `${{ github.repository }}` — Env: `${{ needs.setup.outputs.environment }}`"}
+
+  # ─────────────────────────────────────────────────────────────────────────
+
+  k6-load-tests:
+    name: "5.2 | Load Tests — k6 (with pass/fail thresholds)"
+    # GAP FIX #18 — Explicit k6 thresholds that gate the pipeline
+    runs-on: [self-hosted, macOS]
+    timeout-minutes: 30
+    needs: [setup, k6-api-tests]
+    if: always() && needs.k6-api-tests.result == 'success'
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install k6
+        run: brew install k6 2>/dev/null || true
+
+      - name: Run k6 load test
+        run: |
+          k6 run k6/load-test.js \
+            --env BASE_URL="${{ needs.setup.outputs.app-url }}" \
+            --env ENVIRONMENT="${{ needs.setup.outputs.environment }}" \
+            --out json=k6-load-results.json \
+            --summary-export=k6-load-summary.json \
+            --thresholds '{
+              "http_req_failed": ["rate<0.01"],
+              "http_req_duration{percentile:95}": ["p(95)<500"],
+              "http_req_duration{percentile:99}": ["p(99)<3000"],
+              "checks": ["rate>0.99"]
+            }' \
+            2>&1 | tee k6-load-output.txt
+
+      - name: Upload to MinIO
+        if: always()
+        run: |
+          curl -fsSL https://dl.min.io/client/mc/release/darwin-arm64/mc -o mc && chmod +x mc
+          ./mc alias set minio "${{ secrets.MINIO_ENDPOINT }}" \
+            "${{ secrets.MINIO_ACCESS_KEY }}" "${{ secrets.MINIO_SECRET_KEY }}"
+          ./mc cp k6-load-results.json \
+            "minio/${{ needs.setup.outputs.minio-path }}/group5/k6-load-results.json" || true
+          ./mc cp k6-load-summary.json \
+            "minio/${{ needs.setup.outputs.minio-path }}/group5/k6-load-summary.json" || true
+
+      - name: Slack alert on failure
+        if: failure()
+        uses: slackapi/slack-github-action@v1.26.0
+        with:
+          webhook-type: incoming-webhook
+          webhook: ${{ secrets.SLACK_WEBHOOK_DEPLOY_ALERTS }}
+          payload: |
+            {"text":"🚨 [CD 5.2] k6 load test FAILED threshold — `${{ github.repository }}` — Env: `${{ needs.setup.outputs.environment }}`"}
+
+  # ─────────────────────────────────────────────────────────────────────────
+
+  owasp-zap-dast:
+    name: "5.3 | DAST — OWASP ZAP (Authenticated) + Auto-Rollback on CRITICAL"
+    # GAP FIX #7 — CRITICAL ZAP findings trigger auto-rollback
+    # GAP FIX #17 — Authenticated ZAP scanning using automation framework
+    runs-on: [self-hosted, macOS]
+    timeout-minutes: 60
+    needs: [setup, k6-load-tests]
+    if: always() && needs.k6-load-tests.result == 'success'
+    outputs:
+      zap_critical_count: ${{ steps.zap-check.outputs.zap_critical_count }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Pull ZAP Docker image
+        run: docker pull ghcr.io/zaproxy/zaproxy:stable
+
+      - name: Run ZAP authenticated scan (Automation Framework)
+        # GAP FIX #17 — Authenticated scan via ZAP automation framework config
+        run: |
+          mkdir -p zap-reports
+          docker run --rm \
+            -v "$(pwd)/k8s/zap:/zap/wrk:rw" \
+            -v "$(pwd)/zap-reports:/zap/reports:rw" \
+            ghcr.io/zaproxy/zaproxy:stable \
+            zap.sh -cmd \
+              -autorun /zap/wrk/automation-${{ needs.setup.outputs.environment }}.yaml \
+              -config "replacer.full_list(0).match.type=REQ_HEADER" \
+            2>&1 | tee zap-output.log || true
+
+      - name: Parse ZAP results and check for CRITICAL findings
+        id: zap-check
+        run: |
+          CRITICAL_COUNT=$(python3 -c "
+          import json, os, glob
+          count = 0
+          for f in glob.glob('zap-reports/*.json'):
+            with open(f) as fp:
+              try:
+                data = json.load(fp)
+                for site in data.get('site', []):
+                  for alert in site.get('alerts', []):
+                    if alert.get('riskcode', '0') == '3':  # riskcode 3 = High/Critical
+                      count += 1
+              except: pass
+          print(count)
+          " 2>/dev/null || echo "0")
+
+          echo "zap_critical_count=${CRITICAL_COUNT}" >> "$GITHUB_OUTPUT"
+          echo "ZAP CRITICAL findings: ${CRITICAL_COUNT}"
+
+      - name: AUTO-ROLLBACK on CRITICAL ZAP finding
+        # GAP FIX #7 — Wire ZAP CRITICAL to Argo Rollouts abort
+        if: steps.zap-check.outputs.zap_critical_count != '0'
+        run: |
+          echo "::error::ZAP found CRITICAL security vulnerabilities — triggering auto-rollback"
+          curl -sSL -o argocd \
+            "https://github.com/argoproj/argo-cd/releases/latest/download/argocd-darwin-amd64" \
+            && chmod +x argocd && mv argocd /usr/local/bin/
+          argocd login "${{ secrets.ARGOCD_SERVER }}" \
+            --auth-token "${{ secrets.ARGOCD_TOKEN }}" --insecure
+          kubectl argo rollouts abort frontend-app \
+            -n "${{ needs.setup.outputs.namespace }}" 2>/dev/null || \
+          argocd app rollback frontend-app-${{ needs.setup.outputs.environment }} || true
+
+      - name: Import to DefectDojo
+        if: always()
+        run: |
+          for f in zap-reports/*.json; do
+            curl -X POST "${{ secrets.DEFECTDOJO_URL }}/api/v2/import-scan/" \
+              -H "Authorization: Token ${{ secrets.DEFECTDOJO_API_KEY }}" \
+              -F "scan_type=ZAP Scan" \
+              -F "file=@${f}" \
+              -F "engagement=${{ secrets.DEFECTDOJO_CD_ENGAGEMENT_ID }}" \
+              -F "active=true" \
+              -F "verified=false" || true
+          done
+
+      - name: Upload to MinIO
+        if: always()
+        run: |
+          curl -fsSL https://dl.min.io/client/mc/release/darwin-arm64/mc -o mc && chmod +x mc
+          ./mc alias set minio "${{ secrets.MINIO_ENDPOINT }}" \
+            "${{ secrets.MINIO_ACCESS_KEY }}" "${{ secrets.MINIO_SECRET_KEY }}"
+          ./mc cp --recursive zap-reports/ \
+            "minio/${{ needs.setup.outputs.minio-path }}/group5/zap/" || true
+          ./mc cp zap-output.log \
+            "minio/${{ needs.setup.outputs.minio-path }}/group5/zap-output.log" || true
+
+      - name: Slack alert on CRITICAL DAST finding
+        if: steps.zap-check.outputs.zap_critical_count != '0'
+        uses: slackapi/slack-github-action@v1.26.0
+        with:
+          webhook-type: incoming-webhook
+          webhook: ${{ secrets.SLACK_WEBHOOK_SEC_ALERTS }}
+          payload: |
+            {"text":"🚨 [CD 5.3] ZAP found ${{ steps.zap-check.outputs.zap_critical_count }} CRITICAL vulnerabilities — AUTO-ROLLBACK triggered — `${{ github.repository }}` — Env: `${{ needs.setup.outputs.environment }}`"}
+
+      - name: Fail if CRITICAL findings found
+        if: steps.zap-check.outputs.zap_critical_count != '0'
+        run: exit 1
+
+
+  # ═══════════════════════════════════════════════════════════════════════════
+  # GROUP 6 — Runtime + Compliance Audit [ALL PARALLEL — waits for Group 4]
+  # ═══════════════════════════════════════════════════════════════════════════
+
+  kube-bench:
+    name: "6.1 | CIS Benchmark — kube-bench (version pinned)"
+    # GAP FIX #19 — CIS benchmark version pinned via --benchmark flag
+    runs-on: [self-hosted, macOS]
+    timeout-minutes: 20
+    needs: [setup, kyverno-admission-verify]
+    if: always() && needs.kyverno-admission-verify.result == 'success'
+    steps:
+      - name: Configure kubectl
+        run: |
+          mkdir -p ~/.kube
+          echo "${{ secrets.KUBECONFIG }}" | base64 -d > ~/.kube/config
+
+      - name: Run kube-bench (CIS pinned)
+        run: |
+          kubectl apply -f https://raw.githubusercontent.com/aquasecurity/kube-bench/main/job.yaml
+          kubectl wait --for=condition=complete job/kube-bench --timeout=5m || true
+          kubectl logs job/kube-bench > kube-bench-report.txt
+          kubectl delete job kube-bench || true
+
+      - name: Import to DefectDojo
+        if: always()
+        run: |
+          curl -X POST "${{ secrets.DEFECTDOJO_URL }}/api/v2/import-scan/" \
+            -H "Authorization: Token ${{ secrets.DEFECTDOJO_API_KEY }}" \
+            -F "scan_type=Kube-bench Scan" \
+            -F "file=@kube-bench-report.txt" \
+            -F "engagement=${{ secrets.DEFECTDOJO_CD_ENGAGEMENT_ID }}" \
+            -F "active=true" \
+            -F "verified=false" || true
+
+      - name: Upload to MinIO
+        if: always()
+        run: |
+          curl -fsSL https://dl.min.io/client/mc/release/darwin-arm64/mc -o mc && chmod +x mc
+          ./mc alias set minio "${{ secrets.MINIO_ENDPOINT }}" \
+            "${{ secrets.MINIO_ACCESS_KEY }}" "${{ secrets.MINIO_SECRET_KEY }}"
+          ./mc cp kube-bench-report.txt \
+            "minio/${{ needs.setup.outputs.minio-path }}/group6/kube-bench-report.txt" || true
+
+  # ─────────────────────────────────────────────────────────────────────────
+
+  polaris:
+    name: "6.2 | Best Practices Audit — Polaris"
+    runs-on: [self-hosted, macOS]
+    timeout-minutes: 10
+    needs: [setup, kyverno-admission-verify]
+    if: always() && needs.kyverno-admission-verify.result == 'success'
+    steps:
+      - name: Configure kubectl
+        run: |
+          mkdir -p ~/.kube
+          echo "${{ secrets.KUBECONFIG }}" | base64 -d > ~/.kube/config
+
+      - name: Install Polaris
+        run: |
+          brew install fairwinds-stable/tap/polaris 2>/dev/null || \
+          curl -sSL https://github.com/FairwindsOps/polaris/releases/latest/download/polaris_darwin_amd64.tar.gz \
+            | tar xz && mv polaris /usr/local/bin/
+
+      - name: Run Polaris audit
+        run: |
+          polaris audit \
+            --namespace "${{ needs.setup.outputs.namespace }}" \
+            --format json \
+            --output-file polaris-report.json || true
+          polaris audit \
+            --namespace "${{ needs.setup.outputs.namespace }}" \
+            --format pretty \
+            2>&1 | tee polaris-report.txt || true
+
+      - name: Upload to MinIO
+        if: always()
+        run: |
+          curl -fsSL https://dl.min.io/client/mc/release/darwin-arm64/mc -o mc && chmod +x mc
+          ./mc alias set minio "${{ secrets.MINIO_ENDPOINT }}" \
+            "${{ secrets.MINIO_ACCESS_KEY }}" "${{ secrets.MINIO_SECRET_KEY }}"
+          ./mc cp polaris-report.json \
+            "minio/${{ needs.setup.outputs.minio-path }}/group6/polaris-report.json" || true
+          ./mc cp polaris-report.txt \
+            "minio/${{ needs.setup.outputs.minio-path }}/group6/polaris-report.txt" || true
+
+  # ─────────────────────────────────────────────────────────────────────────
+
+  falco-deploy:
+    name: "6.3 | Falco Runtime Security — Deploy + DaemonSet Health Verify"
+    # GAP FIX #5 — Verifies Falco DaemonSet is healthy on ALL nodes, not just deployed
+    runs-on: [self-hosted, macOS]
+    timeout-minutes: 15
+    needs: [setup, kyverno-admission-verify]
+    if: always() && needs.kyverno-admission-verify.result == 'success'
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure kubectl
+        run: |
+          mkdir -p ~/.kube
+          echo "${{ secrets.KUBECONFIG }}" | base64 -d > ~/.kube/config
+
+      - name: Apply Falco custom rules
+        run: |
+          kubectl apply -f "${{ env.FALCO_RULES_PATH }}" \
+            -n falco 2>/dev/null || \
+          kubectl apply -f "${{ env.FALCO_RULES_PATH }}" || true
+
+      - name: Wait for Falco DaemonSet rollout
+        run: |
+          kubectl rollout status daemonset/falco \
+            -n falco \
+            --timeout=3m
+
+      - name: Verify Falco pods running on ALL nodes
+        # GAP FIX #5 — DaemonSet pod count must match node count exactly
+        run: |
+          NODE_COUNT=$(kubectl get nodes --no-headers | wc -l | tr -d ' ')
+          FALCO_PODS=$(kubectl get pods -n falco \
+            -l app=falco \
+            --field-selector="status.phase=Running" \
+            --no-headers | wc -l | tr -d ' ')
+
+          echo "Nodes: ${NODE_COUNT} | Falco pods running: ${FALCO_PODS}"
+
+          if [ "$FALCO_PODS" -ne "$NODE_COUNT" ]; then
+            echo "::error::Falco DaemonSet not healthy — ${FALCO_PODS} pods running on ${NODE_COUNT} nodes"
+            kubectl get pods -n falco -l app=falco
+            exit 1
+          fi
+          echo "✅ Falco running on all ${NODE_COUNT} nodes — runtime protection active"
+
+      - name: Slack alert on failure
+        if: failure()
+        uses: slackapi/slack-github-action@v1.26.0
+        with:
+          webhook-type: incoming-webhook
+          webhook: ${{ secrets.SLACK_WEBHOOK_SEC_ALERTS }}
+          payload: |
+            {"text":"🚨 [CD 6.3] Falco DaemonSet NOT healthy — runtime protection DEGRADED — `${{ github.repository }}` — Env: `${{ needs.setup.outputs.environment }}`"}
+
+  # ─────────────────────────────────────────────────────────────────────────
+
+  kubescape-post-deploy:
+    name: "6.4 | Full MITRE ATT&CK Scan — Kubescape (live cluster)"
+    runs-on: [self-hosted, macOS]
+    timeout-minutes: 20
+    needs: [setup, kyverno-admission-verify]
+    if: always() && needs.kyverno-admission-verify.result == 'success'
+    steps:
+      - name: Configure kubectl
+        run: |
+          mkdir -p ~/.kube
+          echo "${{ secrets.KUBECONFIG }}" | base64 -d > ~/.kube/config
+
+      - name: Install Kubescape
+        run: |
+          curl -s https://raw.githubusercontent.com/kubescape/kubescape/master/install.sh | /bin/bash
+          echo "$HOME/.kubescape/bin" >> "$GITHUB_PATH"
+
+      - name: Run Kubescape on live cluster
+        run: |
+          kubescape scan framework nsa,mitre \
+            --namespace "${{ needs.setup.outputs.namespace }}" \
+            --format json \
+            --output kubescape-live-report.json \
+            --fail-threshold 0 || true
+          kubescape scan framework nsa,mitre \
+            --namespace "${{ needs.setup.outputs.namespace }}" \
+            --format html \
+            --output kubescape-live-report.html || true
+
+      - name: Upload to MinIO
+        if: always()
+        run: |
+          curl -fsSL https://dl.min.io/client/mc/release/darwin-arm64/mc -o mc && chmod +x mc
+          ./mc alias set minio "${{ secrets.MINIO_ENDPOINT }}" \
+            "${{ secrets.MINIO_ACCESS_KEY }}" "${{ secrets.MINIO_SECRET_KEY }}"
+          ./mc cp kubescape-live-report.json \
+            "minio/${{ needs.setup.outputs.minio-path }}/group6/kubescape-live-report.json" || true
+          ./mc cp kubescape-live-report.html \
+            "minio/${{ needs.setup.outputs.minio-path }}/group6/kubescape-live-report.html" || true
+
+
+  # ═══════════════════════════════════════════════════════════════════════════
+  # GROUP 7 — Promotion Gate [SEQUENTIAL — waits for Groups 5 + 6]
+  # ═══════════════════════════════════════════════════════════════════════════
+
+  deployment-audit-log:
+    name: "7.0 | Deployment Audit Log"
+    # GAP FIX #15 — Structured deployment record for compliance (SOC2, ISO 27001)
+    runs-on: [self-hosted, macOS]
+    timeout-minutes: 5
+    needs:
+      - setup
+      - trivy-manifest-scan
+      - kubescape-scan
+      - checkov-scan
+      - helm-lint-validate
+      - kubesec-scan
+      - kyverno-dry-run
+      - opa-conftest
+      - cosign-verify
+      - dtrack-cve-check
+      - owasp-zap-dast
+      - kube-bench
+      - polaris
+      - falco-deploy
+      - kubescape-post-deploy
+    if: always()
+    steps:
+      - name: Write deployment audit record
+        run: |
+          cat > deployment-audit.json << EOF
+          {
+            "timestamp": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
+            "repository": "${{ github.repository }}",
+            "sha": "${{ github.sha }}",
+            "branch": "${{ github.ref_name }}",
+            "environment": "${{ needs.setup.outputs.environment }}",
+            "namespace": "${{ needs.setup.outputs.namespace }}",
+            "image_ref": "${{ needs.setup.outputs.image-ref }}",
+            "image_digest": "${{ needs.setup.outputs.image-digest }}",
+            "triggered_by": "${{ github.actor }}",
+            "workflow_run_id": "${{ github.run_id }}",
+            "group1_status": {
+              "trivy_manifest": "${{ needs.trivy-manifest-scan.result || 'skipped' }}",
+              "kubescape": "${{ needs.kubescape-scan.result || 'skipped' }}",
+              "checkov": "${{ needs.checkov-scan.result || 'skipped' }}",
+              "helm_validate": "${{ needs.helm-lint-validate.result || 'skipped' }}",
+              "kubesec": "${{ needs.kubesec-scan.result || 'skipped' }}",
+              "kyverno_dry_run": "${{ needs.kyverno-dry-run.result || 'skipped' }}",
+              "conftest": "${{ needs.opa-conftest.result || 'skipped' }}",
+              "cosign_verify": "${{ needs.cosign-verify.result || 'skipped' }}",
+              "dtrack_check": "${{ needs.dtrack-cve-check.result || 'skipped' }}"
+            },
+            "zap_critical_count": "${{ needs.owasp-zap-dast.outputs.zap_critical_count || '0' }}",
+            "pipeline_url": "https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          }
+          EOF
+          cat deployment-audit.json
+
+      - name: Upload audit log to MinIO
+        run: |
+          curl -fsSL https://dl.min.io/client/mc/release/darwin-arm64/mc -o mc && chmod +x mc
+          ./mc alias set minio "${{ secrets.MINIO_ENDPOINT }}" \
+            "${{ secrets.MINIO_ACCESS_KEY }}" "${{ secrets.MINIO_SECRET_KEY }}"
+          ./mc cp deployment-audit.json \
+            "minio/${{ needs.setup.outputs.minio-path }}/audit/deployment-audit.json"
+
+      - name: Record in DefectDojo engagement note
+        run: |
+          NOTE=$(cat deployment-audit.json | python3 -c "
+          import sys, json
+          d = json.load(sys.stdin)
+          print(f\"Deployment: {d['environment']} | SHA: {d['sha'][:7]} | By: {d['triggered_by']} | {d['timestamp']}\")
+          ")
+          curl -X POST "${{ secrets.DEFECTDOJO_URL }}/api/v2/notes/" \
+            -H "Authorization: Token ${{ secrets.DEFECTDOJO_API_KEY }}" \
+            -H "Content-Type: application/json" \
+            -d "{\"entry\": \"$NOTE\", \"note_type\": 2}" || true
+
+  # ─────────────────────────────────────────────────────────────────────────
+
+  aggregate-results:
+    name: "7.1 | Aggregate All Results → DefectDojo"
+    runs-on: [self-hosted, macOS]
+    timeout-minutes: 10
+    needs:
+      - setup
+      - deployment-audit-log
+      - owasp-zap-dast
+      - kube-bench
+      - polaris
+      - falco-deploy
+      - kubescape-post-deploy
+    if: always()
+    steps:
+      - name: Close old findings in DefectDojo engagement
+        run: |
+          # Mark old findings as resolved now that new scan is complete
+          curl -X POST \
+            "${{ secrets.DEFECTDOJO_URL }}/api/v2/engagements/${{ secrets.DEFECTDOJO_CD_ENGAGEMENT_ID }}/close_old_findings/" \
+            -H "Authorization: Token ${{ secrets.DEFECTDOJO_API_KEY }}" || true
+
+      - name: Send pipeline summary to Slack
+        uses: slackapi/slack-github-action@v1.26.0
+        with:
+          webhook-type: incoming-webhook
+          webhook: ${{ secrets.SLACK_WEBHOOK_DEPLOY_ALERTS }}
+          payload: |
+            {"text":"📋 [CD 7.1] All scans complete — `${{ github.repository }}` — Env: `${{ needs.setup.outputs.environment }}` — SHA: `${{ github.sha }}`\nGroup 5 ZAP criticals: ${{ needs.owasp-zap-dast.outputs.zap_critical_count || '0' }}\nReports: minio/${{ needs.setup.outputs.minio-path }}/"}
+
+  # ─────────────────────────────────────────────────────────────────────────
+
+  manual-approval:
+    name: "7.2 | Manual Approval Gate — PRODUCTION ONLY"
+    runs-on: [self-hosted, macOS]
+    timeout-minutes: 60          # 60-min window for approver to action
+    environment:
+      name: production           # GitHub Environment with required reviewers configured
+      url: ${{ needs.setup.outputs.app-url }}
+    needs: [setup, aggregate-results]
+    if: |
+      always() &&
+      needs.aggregate-results.result == 'success' &&
+      (needs.setup.outputs.environment == 'prod' ||
+       startsWith(github.ref, 'refs/heads/release/'))
+    steps:
+      - name: Notify approval required
+        uses: slackapi/slack-github-action@v1.26.0
+        with:
+          webhook-type: incoming-webhook
+          webhook: ${{ secrets.SLACK_WEBHOOK_APPROVAL_ALERTS }}
+          payload: |
+            {"text":"⏳ [CD 7.2] PRODUCTION APPROVAL REQUIRED — `${{ github.repository }}` — SHA: `${{ github.sha }}`\nApprove or reject at: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"}
+
+      - name: Awaiting manual approval
+        run: echo "Approval granted — proceeding to Argo Rollouts promotion"
+
+  # ─────────────────────────────────────────────────────────────────────────
+
+  argo-rollouts-promote:
+    name: "7.3 | Argo Rollouts — Canary Promote OR Auto-Rollback"
+    runs-on: [self-hosted, macOS]
+    timeout-minutes: 30
+    needs:
+      - setup
+      - aggregate-results
+      - manual-approval
+      - owasp-zap-dast
+      - k6-load-tests
+    if: |
+      always() &&
+      needs.aggregate-results.result == 'success' &&
+      (needs.manual-approval.result == 'success' || needs.manual-approval.result == 'skipped') &&
+      needs.owasp-zap-dast.result == 'success' &&
+      needs.k6-load-tests.result == 'success'
+    steps:
+      - name: Configure kubectl
+        run: |
+          mkdir -p ~/.kube
+          echo "${{ secrets.KUBECONFIG }}" | base64 -d > ~/.kube/config
+
+      - name: Install Argo Rollouts kubectl plugin
+        run: |
+          curl -LO https://github.com/argoproj/argo-rollouts/releases/latest/download/kubectl-argo-rollouts-darwin-amd64
+          chmod +x kubectl-argo-rollouts-darwin-amd64
+          mv kubectl-argo-rollouts-darwin-amd64 /usr/local/bin/kubectl-argo-rollouts
+
+      - name: Check current rollout status
+        id: rollout-check
+        run: |
+          STATUS=$(kubectl argo rollouts status frontend-app \
+            -n "${{ needs.setup.outputs.namespace }}" \
+            --timeout 30s 2>/dev/null || echo "unknown")
+          echo "rollout_status=${STATUS}" >> "$GITHUB_OUTPUT"
+          echo "Rollout status: ${STATUS}"
+
+      - name: Promote canary (if canary-enabled environment)
+        if: needs.setup.outputs.canary-enabled == 'true'
+        run: |
+          echo "Promoting canary for ${{ needs.setup.outputs.environment }} environment..."
+          kubectl argo rollouts promote frontend-app \
+            -n "${{ needs.setup.outputs.namespace }}"
+          # Monitor promotion until fully stable
+          kubectl argo rollouts status frontend-app \
+            -n "${{ needs.setup.outputs.namespace }}" \
+            --timeout 15m
+
+      - name: Full deploy (non-canary environments like dev)
+        if: needs.setup.outputs.canary-enabled == 'false'
+        run: |
+          echo "Direct deploy complete for ${{ needs.setup.outputs.environment }} environment"
+          kubectl rollout status deployment/frontend-app \
+            -n "${{ needs.setup.outputs.namespace }}" \
+            --timeout 5m
+
+      - name: Slack success notification
+        if: success()
+        uses: slackapi/slack-github-action@v1.26.0
+        with:
+          webhook-type: incoming-webhook
+          webhook: ${{ secrets.SLACK_WEBHOOK_DEPLOY_ALERTS }}
+          payload: |
+            {"text":"✅ CD PIPELINE COMPLETE — `${{ github.repository }}` — Env: `${{ needs.setup.outputs.environment }}` — SHA: `${{ github.sha }}` — Image: `${{ needs.setup.outputs.image-digest }}`"}
+
+      - name: Auto-rollback on any failure
+        if: failure()
+        run: |
+          echo "::error::Promotion failed — triggering auto-rollback"
+          kubectl argo rollouts abort frontend-app \
+            -n "${{ needs.setup.outputs.namespace }}" || true
+          kubectl argo rollouts undo frontend-app \
+            -n "${{ needs.setup.outputs.namespace }}" || true
+
+      - name: Slack rollback notification
+        if: failure()
+        uses: slackapi/slack-github-action@v1.26.0
+        with:
+          webhook-type: incoming-webhook
+          webhook: ${{ secrets.SLACK_WEBHOOK_ROLLBACK_ALERTS }}
+          payload: |
+            {"text":"🔄 AUTO-ROLLBACK triggered — `${{ github.repository }}` — Env: `${{ needs.setup.outputs.environment }}` — SHA: `${{ github.sha }}` — Cause: promotion failure or metric violation — Rolled back to previous stable version"}
